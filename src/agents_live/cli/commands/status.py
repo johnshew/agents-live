@@ -7,15 +7,19 @@ import os
 import sys
 from pathlib import Path
 
-from ... import __version__, agent, obs, paths, state
+from ... import __version__, agent, obs, paths, runtime, state
 from ...state import ownership, registry as repos
 from .. import agent_view, identity, resolve
 
 
-def _policy(spec: agent.AgentSpec) -> dict[str, object] | None:
+def _policy(spec: agent.AgentSpec,
+            registered: dict[str, str] | None = None) -> dict[str, object] | None:
     """How the definition runs, for callers that would otherwise parse it.
 
     Deliberately omits env, whose values are the definition's secrets.
+    *registered* maps a schedule to the task definition Task Scheduler
+    holds for it, so diagnostics compare the registered trigger, not
+    only the one that would be computed now (#609).
     """
     config = spec.execution
     if config is None:
@@ -35,12 +39,38 @@ def _policy(spec: agent.AgentSpec) -> dict[str, object] | None:
     for schedule in config.schedules:
         try:
             from ...runtime.hosts import task_scheduler
-            schedule_diagnostics.append(task_scheduler.diagnostics(schedule))
+            schedule_diagnostics.append(task_scheduler.diagnostics(
+                schedule, registered=(registered or {}).get(schedule)))
         except Exception:
             pass
     if schedule_diagnostics:
         policy["schedule_diagnostics"] = schedule_diagnostics
     return policy
+
+
+def _registered_triggers(root: Path, spec: agent.AgentSpec) -> dict[str, str]:
+    """Task definitions registered for *spec*'s schedules, on Windows only."""
+    from ...runtime.hosts import system as hostruntime
+    if spec.execution is None or hostruntime.id() != hostruntime.WINDOWS:
+        return {}
+    try:
+        read = getattr(runtime.current().trigger_store, "registered_definition", None)
+        if read is None:
+            return {}
+        found: dict[str, str] = {}
+        for schedule in spec.execution.schedules:
+            key = runtime.Subscription.create(
+                scope=f"repo:{root.resolve()}", target=f"agent:{spec.identifier}",
+                kind="schedule", trigger=runtime.parse_schedule(schedule).canonical,
+            ).key
+            document = read(key)
+            if document is not None:
+                found[schedule] = document
+        return found
+    except Exception:
+        # Status reports what it can read; an unreadable store only
+        # removes the comparison, as the diagnostics above already do.
+        return {}
 
 
 def _rows(root: Path, selected: str | None = None) -> list[dict[str, object]]:
@@ -108,7 +138,8 @@ def _rows(root: Path, selected: str | None = None) -> list[dict[str, object]]:
             spec = discovered.get(identifier) or agent.load(identifier, root=root)
             name = spec.name
             description = spec.properties.description
-            policy = _policy(spec)
+            policy = _policy(spec, _registered_triggers(root, spec)
+                             if identifier in started_names else None)
             prompt_path = str(spec.prompt_path)
             unknown_metadata = list(spec.unknown_metadata)
         except agent.DefinitionError as exc:

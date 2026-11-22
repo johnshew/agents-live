@@ -1387,12 +1387,17 @@ class TestRuntimeCore(unittest.TestCase):
         ):
             desired = WindowsHost().render(subscription)
         data = json.loads(desired.rendered)
+        registered = task_scheduler.build_task_xml(
+            command="C:/tools/new/pythonw.exe", arguments="", working_dir=data["root"],
+            schedules=[data["schedule"]], description="fixture", uri="fixture",
+            user_id="user")
         task = {
             "name": "Subscription-" + desired.key,
             "command": "C:/tools/new/pythonw.exe",
             "arguments": task_scheduler.argument_string([
                 "-P", "-m", "agents_live.runtime.hosts.hidden", *data["argv"]]),
             "working_dir": data["root"],
+            "trigger": task_scheduler.registered_trigger_identity(registered),
         }
         for changes in (
             {},
@@ -1408,6 +1413,77 @@ class TestRuntimeCore(unittest.TestCase):
                     ["remove-trigger", "install-trigger"] if changes else [],
                     [item.kind for item in operations],
                 )
+
+    def test_windows_maintenance_reregisters_pinned_clock_trigger_once(self) -> None:
+        """A task registered with an offset-pinned boundary converges once (#609)."""
+        from agents_live.runtime import convergence
+        from agents_live.runtime.hosts.windows import WindowsTriggerStore
+
+        definitions: dict[str, str] = {}
+        created: list[str] = []
+
+        def exported(document: str) -> str:
+            # Task Scheduler exports omit some elements left at their
+            # defaults; comparison must not read that as a change.
+            return document.replace("<StopAtDurationEnd>false</StopAtDurationEnd>", "")
+
+        def schtasks(args, **_kwargs):
+            if args[0] == "/Create":
+                path = args[args.index("/TN") + 1]
+                xml_file = Path(args[args.index("/XML") + 1])
+                definitions[path] = exported(xml_file.read_bytes().decode("utf-16"))
+                created.append(path)
+                return 0, "", ""
+            if args[0] == "/Delete":
+                definitions.pop(args[args.index("/TN") + 1], None)
+                return 0, "", ""
+            if args[0] == "/Query":
+                return 0, "".join(f'"{path}","N/A","Ready"\n' for path in definitions), ""
+            raise AssertionError(f"unexpected schtasks call {args}")
+
+        subscription = Subscription.create(
+            scope="repo:C:/work/example", target="agent:sample",
+            kind="schedule", trigger="0 */12 * * *")
+        host = WindowsHost()
+        with (
+            mock.patch("agents_live.runtime.hosts.windows.cli_executable_path",
+                       return_value=Path("C:/tools/agents-live.exe")),
+            mock.patch.object(task_scheduler, "_run", side_effect=schtasks),
+            mock.patch.object(task_scheduler, "read_definition",
+                              side_effect=lambda path: definitions.get(path)),
+            mock.patch.object(task_scheduler, "current_user_id", return_value="user"),
+        ):
+            desired = host.render(subscription)
+            data = json.loads(desired.rendered)
+            command, arguments = task_scheduler.action_form(data["argv"][0], data["argv"][1:])
+            path = f"{task_scheduler.TASK_FOLDER}\\Subscription-{desired.key}"
+            # Registered before the fix, in daylight time.
+            document = task_scheduler.build_task_xml(
+                command=command, arguments=arguments, working_dir=data["root"],
+                schedules=[data["schedule"]], description="fixture", uri=path,
+                user_id="user",
+                now=datetime(2026, 10, 29, 10, tzinfo=timezone(timedelta(hours=-4))))
+            definitions[path] = exported(document.replace(
+                "<StartBoundary>2026-10-29T00:00:00</StartBoundary>",
+                "<StartBoundary>2026-10-29T00:00:00-04:00</StartBoundary>"))
+
+            def maintain() -> list[str]:
+                prepared = convergence.plan((subscription,), watchers=(), _host=host)
+                result = convergence.commit(prepared, prepare=False)
+                self.assertEqual((), result.failed)
+                return [item.kind for item in prepared.operations]
+
+            self.assertEqual(["remove-trigger", "install-trigger"], maintain())
+            self.assertEqual([path], created)
+            self.assertEqual(task_scheduler.LOCAL,
+                             task_scheduler.boundary_form(definitions[path]))
+            self.assertIsNone(task_scheduler.trigger_drift(
+                definitions[path], [data["schedule"]]))
+            for _ in range(2):
+                self.assertEqual([], maintain())
+            self.assertEqual([path], created)
+            self.assertEqual([desired.fingerprint],
+                             [item.fingerprint for item in WindowsTriggerStore().list()])
 
     def test_windows_generation_change_replaces_agent_and_maintenance(self) -> None:
         host = MemoryHost()
@@ -8370,21 +8446,21 @@ class TestWindowsTaskScheduling(unittest.TestCase):
         )
         cases = (
             ("@monthly", "0 0 1 * *", "monthly", None, None,
-             "2026-10-01T00:00:00-04:00", True, None, 12, 12, "year",
+             "2026-10-01T00:00:00", True, None, 12, 12, "year",
              "exact translation with 12 native firing(s) per year"),
             ("0 0 29 FEB *", "0 0 29 FEB *", "monthly", None, None,
-             "2028-02-29T00:00:00-04:00", True, None, 0, 0, "year",
+             "2028-02-29T00:00:00", True, None, 0, 0, "year",
              "exact translation with 0 native firing(s) per year"),
             ("*/10 9-17 * * MON-FRI", "*/10 9-17 * * MON-FRI", "weekly",
-             "PT10M", "PT8H51M", "2026-09-08T09:00:00-04:00", True, None,
+             "PT10M", "PT8H51M", "2026-09-08T09:00:00", True, None,
              270, 270, "week",
              "exact translation with 270 native firing(s) per week"),
             ("0 0 1,15 * MON", "0 0 1,15 * MON", "daily", None, None,
-             "2026-09-09T00:00:00-04:00", False, calendar_reason, 1, 0, "day",
+             "2026-09-09T00:00:00", False, calendar_reason, 1, 0, "day",
              "covering translation with 1 native firing(s) per day (0 due): "
              + calendar_reason),
             ("*/7 * * * *", "*/7 * * * *", "daily", "PT1M", "P1D",
-             "2026-09-08T00:00:00-04:00", False, minute_reason, 1440, 216, "day",
+             "2026-09-08T00:00:00", False, minute_reason, 1440, 216, "day",
              "covering translation with 1440 native firing(s) per day (216 due): "
              + minute_reason),
             ("@reboot", "@reboot", "boot", None, None, "on logon", True, None,
@@ -8520,12 +8596,13 @@ class TestWindowsTaskScheduling(unittest.TestCase):
                     namespace = {"t": "http://schemas.microsoft.com/windows/2004/02/mit/task"}
                     triggers = root.findall("t:Triggers/*", namespace)
                     self.assertEqual(1, len(triggers))
-                    self.assertEqual(boundary + offset, triggers[0].findtext(
+                    self.assertEqual(boundary, triggers[0].findtext(
                         "t:StartBoundary", namespaces=namespace))
                     self.assertEqual("true", root.findtext(
                         "t:Settings/t:StartWhenAvailable", namespaces=namespace))
 
-    def test_daily_boundary_preserves_local_utc_offset(self) -> None:
+    def test_daily_boundary_is_local_midnight_read_back_as_written(self) -> None:
+        """A daily cron registers local midnight and reads back as midnight (#397, #609)."""
         local_now = datetime(
             2026, 8, 23, 16, 0,
             tzinfo=timezone(timedelta(hours=-6)),
@@ -8542,10 +8619,66 @@ class TestWindowsTaskScheduling(unittest.TestCase):
             now=local_now,
         )
 
-        self.assertIn(
-            "<StartBoundary>2026-08-24T00:00:00-06:00</StartBoundary>",
-            task_xml,
-        )
+        # Wall-clock midnight, not the UTC instant and not midnight UTC.
+        self.assertIn("<StartBoundary>2026-08-24T00:00:00</StartBoundary>", task_xml)
+        # A boundary without an offset is local time: whatever zone reads
+        # it back, it is never reinterpreted as UTC (the #397 failure).
+        for zone in (timezone.utc, timezone(timedelta(hours=-6)),
+                     timezone(timedelta(hours=9))):
+            with self.subTest(zone=zone):
+                self.assertEqual([("daily", 0, 0)],
+                                 task_scheduler._definition_signature(task_xml, zone=zone))
+                self.assertIsNone(
+                    task_scheduler.trigger_drift(task_xml, ["0 0 * * *"], zone=zone))
+        self.assertEqual(task_scheduler.LOCAL, task_scheduler.boundary_form(task_xml))
+        diagnostics = task_scheduler.diagnostics(
+            "0 0 * * *", local_now, registered=task_xml)
+        self.assertEqual("2026-08-24T00:00:00", diagnostics["native_trigger"]["boundary"])
+        self.assertTrue(diagnostics["exact"])
+        self.assertEqual({"boundary": ["2026-08-24T00:00:00"], "matches": True,
+                          "drift": None}, diagnostics["registered_trigger"])
+
+    def test_hour_aligned_schedule_keeps_local_time_across_daylight_saving_end(self) -> None:
+        """A trigger registered in daylight time still fires on the cron after it ends (#609)."""
+        schedule = "0 */12 * * *"
+        daylight = timezone(timedelta(hours=-4))
+        standard = timezone(timedelta(hours=-5))
+        registered_at = datetime(2026, 10, 29, 10, 0, tzinfo=daylight)
+        document = task_scheduler.build_task_xml(
+            command="agents-live.exe", arguments="run --name twice-daily",
+            working_dir=r"C:\repo", schedules=[schedule], description="fixture",
+            uri=r"\AgentsLive\fixture", user_id="user", now=registered_at)
+
+        self.assertEqual(["2026-10-29T00:00:00"],
+                         task_scheduler.registered_boundaries(document))
+        # Read after daylight time ended: still 00:00 and 12:00 local, the
+        # minutes dispatch accepts as due.
+        self.assertEqual(task_scheduler.trigger_signature([schedule]),
+                         task_scheduler._definition_signature(document, zone=standard))
+        self.assertIsNone(task_scheduler.trigger_drift(document, [schedule], zone=standard))
+        trigger = task_scheduler.translate(schedule)[0]
+        after = datetime(2026, 11, 2, tzinfo=standard)
+        due, native = task_scheduler.simulate_firings(
+            trigger, schedule, after, after + timedelta(days=1, minutes=-1))
+        self.assertEqual([(0, 0), (12, 0)], [(item.hour, item.minute) for item in native])
+        self.assertEqual(due, native)
+
+        # The shape registered before this fix: the same instant pinned to
+        # the daylight offset reads as 23:00 once the offset changes.
+        pinned = document.replace(
+            "<StartBoundary>2026-10-29T00:00:00</StartBoundary>",
+            "<StartBoundary>2026-10-29T00:00:00-04:00</StartBoundary>")
+        self.assertEqual([("daily", 23, 0, 720, 1440)],
+                         task_scheduler._definition_signature(pinned, zone=standard))
+        self.assertIn("pinned to a UTC offset",
+                      task_scheduler.trigger_drift(pinned, [schedule], zone=standard))
+        self.assertNotEqual(task_scheduler.desired_trigger_identity([schedule]),
+                            task_scheduler.registered_trigger_identity(pinned))
+        status = task_scheduler.diagnostics(
+            schedule, datetime(2026, 11, 22, 10, 0, tzinfo=standard), registered=pinned)
+        self.assertFalse(status["exact"])
+        self.assertFalse(status["registered_trigger"]["matches"])
+        self.assertEqual(["2026-10-29T00:00:00-04:00"], status["registered_trigger"]["boundary"])
 
     def test_each_cron_expression_creates_exactly_one_trigger(self) -> None:
         """Every valid cron expression must compile to exactly one native trigger (#488)."""
