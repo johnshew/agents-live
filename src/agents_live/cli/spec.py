@@ -191,7 +191,8 @@ COMMANDS = (
         ),
     ),
     Cmd(
-        "status", "List agents and whether each is started.", "cli.commands.status", "in-process",
+        "status", "List agents and whether each is started; --json also reports the "
+        "resolved runtime version, channel and commit.", "cli.commands.status", "in-process",
         root="registry", json=True, all_repos=True,
         args=(
             Arg(("name",), "Optional agent name.", kind="positional"),
@@ -254,7 +255,10 @@ COMMANDS = (
             Arg(("--order-by",), "Sort column.", kind="value"),
             Arg(("--desc",), "Sort newest first."),
             Arg(("--asc",), "Sort oldest first."),
-            Arg(("--sql",), "Run custom SQL.", kind="value"),
+            Arg(("--sql",), "Run custom SQL against the `log` view; cannot be "
+                "combined with --agent, --since, --until, --phase, --status, "
+                "--trigger, --slow or --errors, so put those in the WHERE clause.",
+                kind="value"),
             Arg(("--format",), "Output format.", kind="value",
                 choices=("table", "jsonl", "csv"), default="table"),
             Arg(("--check-schema",), "Validate the log schema."),
