@@ -293,8 +293,12 @@ consumed RC1. 6.9.5rc2 was prepared from `7743abd` with the dashboard and
 status responsiveness work (#601, #602, #603, #539), passed isolated acceptance
 and was activated locally on 2026-10-29. A watcher observer start-up timeout
 during activation left no local-deploy receipt; see its cycle history. It is not
-publication-approved. Do not reuse consumed RC2. The next numbered RC is
-`6.9.5rc3`.
+publication-approved. Do not reuse consumed RC2. 6.9.5rc3 was prepared from
+`fff7743` with the Windows schedule time zone fix (#609), the Copilot
+commentary-answer fix (#616), dependency compatibility fixes and help text,
+passed isolated acceptance and was activated locally on 2026-11-22. It is not
+publication-approved. Do not reuse consumed RC3. The next numbered RC is
+`6.9.5rc4`.
 Retained 6.9.2 RC6 does not supersede the approved 6.9.2 RC5 selection. Preserve
 all historical packages,
 receipts and tags, including the rejected unpublished stable-tag conflict.
