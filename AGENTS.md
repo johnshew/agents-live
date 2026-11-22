@@ -33,6 +33,10 @@ a trusted checkout.
 Preserve compatible unfinished goals and explicit sequencing dependencies. A
 question or status request does not pause work. Continue authorized, unblocked
 work until acceptance, an explicit pause/stop, or a genuine boundary prevents it.
+Present developer decisions as plain text in the reply, following
+[.agents/decisions.md](.agents/decisions.md); never use a blocking question
+tool such as `ask_user`, because a pending form captures later messages as its
+answer instead of steering. Continue independent work while a decision is open.
 
 After steering and completion summaries, provide a brief
 workstream/phase/verified-delta/next-action update. Harnesses other than the
@@ -123,6 +127,7 @@ prevail; CDL/GLP add no write, integration, release or deployment authority.
 | When you are... | Read first |
 |---|---|
 | Selecting a subagent model | [.agents/subagent-models.md](.agents/subagent-models.md) |
+| Asking the developer to decide | [.agents/decisions.md](.agents/decisions.md) |
 | Coordinating delegates or child sessions | [.agents/development.md](.agents/development.md#orchestrating-delegates-and-child-sessions) |
 | Changing code, running tests, or building | [.agents/development.md](.agents/development.md) |
 | Understanding the development and release state machine | [docs/development-release-process.md](docs/development-release-process.md) |
@@ -583,3 +588,54 @@ the checkout. Claude Code receives the reminder without the stop backstop.
 #### Follow-up
 Fold into the steering guidance at the next consolidation of this document.
 <!-- /glp-update:v1 id=92849b4c-bd2f-4370-9c67-3333a0ef95e4 -->
+
+<!-- glp-update:v1 id=d2899645-a3e2-4a3d-8149-d7f76623ad80 -->
+<a id="glp-d2899645-a3e2-4a3d-8149-d7f76623ad80"></a>
+### GLP Update: Plain-text decision prompts and a decisions guide
+
+- Update-ID: d2899645-a3e2-4a3d-8149-d7f76623ad80
+- Recorded-UTC: 2026-11-22T07:00:49Z
+- Kind: correction
+- Topics: developer questions, ask_user, steering, decision framing
+- Workstream: 6.9.5 coordination
+- Target: AGENTS.md, Continuous Development and Learning and Load before acting; new .agents/decisions.md; compared origin/main 0fa9a58
+- Source-Session: Copilot app session 2026-11-22 (harness history)
+- Evidence-Basis: mixed
+- Application: applied
+- Consolidation: pending
+
+#### Change
+Ask the developer for decisions in plain text in the reply, never through a
+blocking question tool such as `ask_user`, and continue independent work while
+the decision is open. The new [.agents/decisions.md](.agents/decisions.md)
+defines how a decision is presented: context first, the recommendation marked
+first, one or two alternatives with benefit, cost and reason, and numbered
+decisions with lettered options. It covers presentation only, not where or
+how decisions are recorded. It extends update 3ab5dbe2.
+
+#### Evidence
+- Observation, 2026-11-22: while an `ask_user` form about release approval was
+  open, the developer's next message (a new direction about an open issue)
+  arrived as the form's answer rather than as a steering input.
+- User direction, 2026-11-22: the developer confirmed that the form stalls
+  steering and queued messages, directed plain-text decisions instead, and
+  directed adoption of the decision-prompt approach from another repository
+  the developer maintains. Source guide read 2026-11-22 at its 2026-11-10
+  revision; only its presentation rules are adopted, at the developer's
+  direction, and no source text specific to that repository was copied.
+
+#### Previous Knowledge
+Update 3ab5dbe2 framed decision questions for `ask_user` and did not address
+how a pending form interacts with steering, the answer format, or where
+decisions are recorded. Harness guidance prefers the form; this explicit
+developer direction overrides it for this repository.
+
+#### Verification and Limits
+Documentation only. Observed in the GitHub Copilot app; other harnesses may
+queue messages differently, but the rule applies everywhere for consistency.
+The guide adds no write, release or runtime authority.
+
+#### Follow-up
+Fold this and update 3ab5dbe2 into the steering guidance, pointing to
+`.agents/decisions.md`, at the next consolidation of this document.
+<!-- /glp-update:v1 id=d2899645-a3e2-4a3d-8149-d7f76623ad80 -->
