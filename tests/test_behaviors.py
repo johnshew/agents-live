@@ -4007,6 +4007,25 @@ class TestRunsRecordWhatTheySpent(TempRepository):
         completion = providers.get("copilot").parse(RawOutput(0, stream, ""))
         self.assertEqual('{"marker":"acceptance"}', completion.text)
 
+    def test_copilot_json_keeps_commentary_answer_that_completes_the_task(
+        self,
+    ) -> None:
+        stream = "\n".join(json.dumps(event) for event in [
+            {"type": "assistant.message", "data": {
+                "phase": "commentary", "content": "Calling the second tool.",
+                "toolRequests": [{"name": "lookup"}],
+            }},
+            {"type": "assistant.message", "data": {
+                "phase": "commentary", "content": '{"count": 2}',
+                "toolRequests": [{"name": "task_complete"}],
+            }},
+            {"type": "session.task_complete", "data": {
+                "summary": "Returned the count.", "success": True,
+            }},
+        ])
+        completion = providers.get("copilot").parse(RawOutput(0, stream, ""))
+        self.assertEqual('{"count": 2}', completion.text)
+
     def test_copilot_json_uses_final_checkpoint_and_task_summary_fallback(
         self,
     ) -> None:
