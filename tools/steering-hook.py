@@ -41,8 +41,8 @@ def transform(payload: dict) -> dict:
     return {"modifiedTransformedPrompt": f"{content}\n\n{REMINDER}"}
 
 
-def first_reply_text(transcript: Path) -> str | None:
-    """Return the first non-empty assistant text after the last user message."""
+def reply_texts(transcript: Path) -> list[str]:
+    """Return the non-empty assistant texts after the last user message."""
     events = []
     with transcript.open(encoding="utf-8") as stream:
         for line in stream:
@@ -55,15 +55,21 @@ def first_reply_text(transcript: Path) -> str | None:
         if isinstance(event, dict) and event.get("type") == "user.message":
             last_user = index
     if last_user is None:
-        return None
+        return []
+    texts = []
     for event in events[last_user + 1:]:
         if not isinstance(event, dict) or event.get("type") != "assistant.message":
             continue
         data = event.get("data")
         content = data.get("content") if isinstance(data, dict) else None
         if isinstance(content, str) and content.strip():
-            return content
-    return None
+            texts.append(content)
+    return texts
+
+
+def _opens_with_steering(text: str) -> bool:
+    first_line = next((line for line in text.splitlines() if line.strip()), "")
+    return bool(STEERING_LINE.match(first_line))
 
 
 def stop(payload: dict) -> dict:
@@ -73,13 +79,13 @@ def stop(payload: dict) -> dict:
     if not isinstance(path, str) or not path:
         return {}
     try:
-        text = first_reply_text(Path(path))
+        texts = reply_texts(Path(path))
     except OSError:
         return {}
-    if text is None:
-        return {}
-    first_line = next((line for line in text.splitlines() if line.strip()), "")
-    if STEERING_LINE.match(first_line):
+    # The Copilot app can record the text sent with a reply's first tool call
+    # as empty, so the opening steering line may be missing from the
+    # transcript; the final reply restating it also satisfies the protocol.
+    if not texts or _opens_with_steering(texts[0]) or _opens_with_steering(texts[-1]):
         return {}
     return {
         "decision": "block",
