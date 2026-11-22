@@ -1,7 +1,7 @@
 #!/usr/bin/env -S uv run --quiet --script
 # /// script
 # requires-python = ">=3.12"
-# dependencies = ["duckdb>=1.0", "pytz"]
+# dependencies = ["duckdb>=1.0", "pytz", "tzdata"]
 # ///
 """Query Agents Live logs across current JSONL and archived records.
 

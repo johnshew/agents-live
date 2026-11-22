@@ -1,7 +1,7 @@
 #!/usr/bin/env -S uv run --quiet --script
 # /// script
 # requires-python = ">=3.12"
-# dependencies = ["duckdb", "nicegui>=2.0", "pytz", "PyYAML", "pywebview", "uvicorn>=0.36"]
+# dependencies = ["duckdb", "nicegui>=2.0", "pytz", "PyYAML", "pywebview", "tzdata", "uvicorn>=0.36"]
 # ///
 """Interactive agents-live control panel (single host).
 
@@ -2911,7 +2911,7 @@ def _build_operational_page(page_state: dict | None = None) -> None:
                 with ui.button(icon="filter_list").props(
                         "flat round dense aria-label=Filters") as filter_button:
                     ui.tooltip("Filter agents")
-                    with ui.menu().props("anchor=bottom-right self=top-right") as filter_menu:
+                    with ui.menu().props('anchor="bottom right" self="top right"') as filter_menu:
                         with ui.column().classes("inventory-filters"):
                             with ui.row().classes("w-full items-center justify-between"):
                                 ui.label("Filters").classes("text-sm font-semibold")

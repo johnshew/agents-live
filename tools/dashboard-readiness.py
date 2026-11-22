@@ -770,8 +770,14 @@ def _assert_operational_viewport(
                     f"{mode}: repository mutation lost its websocket connection")
             page.get_by_role("button", name="Close-settings").click()
             scope.click()
-            if page.get_by_role(
-                    "option", name="empty-repository", exact=True).count():
+            page.get_by_role("option", name="All", exact=True).wait_for()
+            # The confirmation status appears before the follow-up refresh
+            # replaces the selector options, so wait for that refresh.
+            try:
+                page.get_by_role(
+                    "option", name="empty-repository", exact=True).wait_for(
+                        state="detached", timeout=10000)
+            except PlaywrightTimeoutError:
                 raise ReadinessError(f"{mode}: unregister did not refresh selector")
 
             registry = directory / "config" / "agents-live" / "config.toml"
