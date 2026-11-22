@@ -13604,10 +13604,19 @@ class TestSteeringHook(unittest.TestCase):
             self.user("earlier"), self.reply("Steering: earlier; done."),
             self.user("file two issues"), self.reply(""),
             self.reply("I'll file both issues first."),
-            self.reply("Steering: late line does not count."))
+            self.reply("Steering: a middle progress note does not count."),
+            self.reply("Both issues are filed."))
         output = self.hook["stop"]({"transcriptPath": path})
         self.assertEqual(output["decision"], "block")
         self.assertIn("Steering:", output["reason"])
+
+    def test_stop_allows_final_reply_that_begins_with_steering_line(self) -> None:
+        path = self.transcript(
+            self.user("1a"), self.reply(""),
+            self.reply("Next I'll read the worker back."),
+            self.reply("Steering: decision; new goals: none; still open: none; "
+                       "continue until: merged.\n\nDone."))
+        self.assertEqual(self.hook["stop"]({"transcriptPath": path}), {})
 
     def test_stop_allows_reply_that_begins_with_steering_line(self) -> None:
         path = self.transcript(

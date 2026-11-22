@@ -456,9 +456,11 @@ def _assert_operational_viewport(
                         or page.get_by_role("button", name="Filters").count() != 1:
                     raise ReadinessError(
                         f"{mode} {width}x{height}: compact controls are absent")
+                # Startup can log the attention summary in both the inventory
+                # and the full snapshot entry, depending on timing.
                 page.locator(".activity-log").get_by_text(
                     "Attention in all registered repositories:", exact=False,
-                ).wait_for()
+                ).first.wait_for()
                 if page.locator(".agent-panel").get_by_text("Attention in", exact=False).count():
                     raise ReadinessError(f"{mode}: attention diagnostics consume inventory space")
                 page.get_by_text("Failing: newest run", exact=False).wait_for()
