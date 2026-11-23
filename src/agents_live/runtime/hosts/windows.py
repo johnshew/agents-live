@@ -15,7 +15,7 @@ from hashlib import sha256
 from pathlib import Path
 
 from ...legacy import artifacts as legacy_artifacts
-from .. import artifacts
+from .. import artifacts, utc
 from ..grammars import parse_schedule, parse_watch
 from ..spawn import cli_executable_path
 from ..values import (
@@ -46,6 +46,7 @@ class WindowsTriggerStore:
             description=f"Agents Live subscription {rendered.key}",
             uri=path,
             user_id=wintasks.current_user_id(),
+            utc_offset=_argv_offset(data["argv"]),
         )
         handle, xml_file = tempfile.mkstemp(suffix=".xml", prefix="agents-live-task-")
         try:
@@ -263,6 +264,8 @@ class WindowsHost:
                     executable, "--repo", root, "run",
                     "--metadata", marker, "--name", target, "--quiet",
                 ]
+            if subscription.utc_offset is not None:
+                argv.append(utc.argument(subscription.utc_offset))
             watcher_argv: tuple[str, ...] = ()
         else:
             watch = parse_watch(subscription.trigger)
@@ -317,6 +320,14 @@ def _action_argv(command: str, arguments: str) -> list[str]:
     return argv
 
 
+def _argv_offset(argv: Sequence[str]) -> str | None:
+    """The ``--utc-offset`` value in a rendered action, or None."""
+    for token in argv:
+        if token.startswith(utc.FLAG + "="):
+            return token.partition("=")[2]
+    return None
+
+
 def _action_fingerprint(argv: Sequence[str], root: str) -> str:
     arguments = list(argv)
     if arguments:
@@ -335,9 +346,9 @@ def _trigger_fingerprint(action: str, trigger: str | None) -> str:
     """An action fingerprint extended by how its clock trigger keeps time.
 
     The subscription key already changes with the schedule text, but not
-    with how a registered task holds it: a boundary pinned to a UTC offset
-    drifts an hour at every daylight saving change while the action and
-    key stay equal (#609). Folding the read-back trigger in makes such a
+    with how a registered task holds it: a boundary without UTC is read in
+    whatever zone Task Scheduler assumes while the action and key stay
+    equal (#609). Folding the read-back trigger in makes such a
     task compare as changed, so convergence re-registers it once. A task
     with no clock boundary (a logon trigger) keeps its action fingerprint,
     which a watcher process also carries.

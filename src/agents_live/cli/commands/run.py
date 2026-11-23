@@ -9,6 +9,7 @@ from pathlib import Path
 
 from ... import agent, paths, runtime
 from ...dispatch import Firing, dispatch
+from ...runtime import utc
 from .. import resolve
 
 
@@ -26,6 +27,7 @@ def main(
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--timeout", type=_positive_timeout)
     parser.add_argument("--no-retry", action="store_true")
+    parser.add_argument("--utc-offset")
     args = parser.parse_args(argv)
     try:
         changed = tuple(json.loads(args.changed_files)) if args.changed_files else ()
@@ -33,6 +35,8 @@ def main(
             raise ValueError("--changed-files must be a JSON string array")
         instructions = _instructions(args)
         options = _options(args.option)
+        if args.utc_offset is not None:
+            utc.zone(args.utc_offset)
     except (json.JSONDecodeError, TypeError, ValueError) as exc:
         print(str(exc), file=sys.stderr)
         return 1
@@ -77,6 +81,7 @@ def main(
         options=options,
         timeout=args.timeout,
         no_retry=args.no_retry,
+        utc_offset=args.utc_offset,
     ))
     if os.environ.get("AGENTS_LIVE_JSON") == "1":
         payload = {

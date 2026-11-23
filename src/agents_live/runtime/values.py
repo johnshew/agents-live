@@ -14,6 +14,9 @@ class Subscription:
     target: str
     kind: str
     trigger: str
+    # The UTC offset a clock wake entry keeps (see runtime.utc). Not part
+    # of the key: it is captured once at registration, not desired state.
+    utc_offset: str | None = None
 
     @classmethod
     def create(cls, *, scope: str, target: str, kind: str, trigger: str) -> "Subscription":
@@ -110,3 +113,5 @@ class Converged:
     done: tuple[Operation, ...]
     failed: tuple[tuple[Operation, str], ...]
     health: Health
+    # (subscription key, UTC offset) for each clock wake entry desired.
+    utc_offsets: tuple[tuple[str, str], ...] = ()

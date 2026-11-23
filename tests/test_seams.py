@@ -1453,19 +1453,19 @@ class TestRuntimeCore(unittest.TestCase):
                               side_effect=lambda path: definitions.get(path)),
             mock.patch.object(task_scheduler, "current_user_id", return_value="user"),
         ):
-            desired = host.render(subscription)
-            data = json.loads(desired.rendered)
+            desired = host.render(convergence.with_utc_offsets([subscription], [])[0])
+            data = json.loads(host.render(subscription).rendered)
             command, arguments = task_scheduler.action_form(data["argv"][0], data["argv"][1:])
             path = f"{task_scheduler.TASK_FOLDER}\\Subscription-{desired.key}"
-            # Registered before the fix, in daylight time.
+            # Registered before the fix, in daylight time, with no stored offset.
             document = task_scheduler.build_task_xml(
                 command=command, arguments=arguments, working_dir=data["root"],
                 schedules=[data["schedule"]], description="fixture", uri=path,
                 user_id="user",
                 now=datetime(2026, 10, 29, 10, tzinfo=timezone(timedelta(hours=-4))))
-            definitions[path] = exported(document.replace(
-                "<StartBoundary>2026-10-29T00:00:00</StartBoundary>",
-                "<StartBoundary>2026-10-29T00:00:00-04:00</StartBoundary>"))
+            definitions[path] = exported(re.sub(
+                r"<StartBoundary>[^<]*</StartBoundary>",
+                "<StartBoundary>2026-10-29T00:00:00-04:00</StartBoundary>", document))
 
             def maintain() -> list[str]:
                 prepared = convergence.plan((subscription,), watchers=(), _host=host)
@@ -1475,7 +1475,7 @@ class TestRuntimeCore(unittest.TestCase):
 
             self.assertEqual(["remove-trigger", "install-trigger"], maintain())
             self.assertEqual([path], created)
-            self.assertEqual(task_scheduler.LOCAL,
+            self.assertEqual(task_scheduler.UTC_FORM,
                              task_scheduler.boundary_form(definitions[path]))
             self.assertIsNone(task_scheduler.trigger_drift(
                 definitions[path], [data["schedule"]]))
@@ -2473,6 +2473,8 @@ class TestStartedState(TempRepository):
         terminate.assert_called_once_with(42)
 
     def test_internal_migrate_converts_task_scheduler_artifact(self) -> None:
+        from agents_live.runtime import utc
+
         self.skill("sample", [
             'agents-live.selector: "fake"',
             'agents-live.schedule: "0 8 * * *"',
@@ -2521,6 +2523,7 @@ class TestStartedState(TempRepository):
                 "--name",
                 spec.identifier,
                 "--quiet",
+                utc.argument(utc.current_offset()),
             ],
             rendered["argv"],
         )
@@ -8435,32 +8438,38 @@ class TestDashboardRepositorySurface(TempRepository):
 
 class TestWindowsTaskScheduling(unittest.TestCase):
     def test_diagnostics_preserve_results_with_bounded_schedule_parsing(self) -> None:
+        from agents_live.runtime import utc
+
         now = datetime(2026, 9, 8, 12, tzinfo=timezone(timedelta(hours=-4)))
         calendar_reason = (
-            "combined day-of-month and day-of-week restrictions cannot be "
-            "represented in a single calendar trigger; covered with daily trigger "
-            "and dispatch filtering"
+            "day, weekday and month restrictions are checked at dispatch; "
+            "covered with daily trigger"
         )
         minute_reason = (
             "non-divisor minute step drifts across hours; covered with safe divisor step"
         )
+        # Boundaries are the next slot at the registered -04:00 offset,
+        # written as UTC; day restrictions wake daily and dispatch filters.
         cases = (
-            ("@monthly", "0 0 1 * *", "monthly", None, None,
-             "2026-10-01T00:00:00", True, None, 12, 12, "year",
-             "exact translation with 12 native firing(s) per year"),
-            ("0 0 29 FEB *", "0 0 29 FEB *", "monthly", None, None,
-             "2028-02-29T00:00:00", True, None, 0, 0, "year",
-             "exact translation with 0 native firing(s) per year"),
-            ("*/10 9-17 * * MON-FRI", "*/10 9-17 * * MON-FRI", "weekly",
-             "PT10M", "PT8H51M", "2026-09-08T09:00:00", True, None,
-             270, 270, "week",
-             "exact translation with 270 native firing(s) per week"),
+            ("@monthly", "0 0 1 * *", "daily", None, None,
+             "2026-09-09T04:00:00Z", False, calendar_reason, 365, 12, "year",
+             "covering translation with 365 native firing(s) per year (12 due): "
+             + calendar_reason),
+            ("0 0 29 FEB *", "0 0 29 FEB *", "daily", None, None,
+             "2026-09-09T04:00:00Z", False, calendar_reason, 365, 0, "year",
+             "covering translation with 365 native firing(s) per year (0 due): "
+             + calendar_reason),
+            ("*/10 9-17 * * MON-FRI", "*/10 9-17 * * MON-FRI", "daily",
+             "PT10M", "PT8H51M", "2026-09-08T13:00:00Z", False, calendar_reason,
+             378, 270, "week",
+             "covering translation with 378 native firing(s) per week (270 due): "
+             + calendar_reason),
             ("0 0 1,15 * MON", "0 0 1,15 * MON", "daily", None, None,
-             "2026-09-09T00:00:00", False, calendar_reason, 1, 0, "day",
-             "covering translation with 1 native firing(s) per day (0 due): "
+             "2026-09-09T04:00:00Z", False, calendar_reason, 365, 74, "year",
+             "covering translation with 365 native firing(s) per year (74 due): "
              + calendar_reason),
             ("*/7 * * * *", "*/7 * * * *", "daily", "PT1M", "P1D",
-             "2026-09-08T00:00:00", False, minute_reason, 1440, 216, "day",
+             "2026-09-08T04:00:00Z", False, minute_reason, 1440, 216, "day",
              "covering translation with 1440 native firing(s) per day (216 due): "
              + minute_reason),
             ("@reboot", "@reboot", "boot", None, None, "on logon", True, None,
@@ -8480,13 +8489,19 @@ class TestWindowsTaskScheduling(unittest.TestCase):
                     return parse_fields(text)
 
                 with mock.patch.object(triggers, "schedule_fields", side_effect=parse_with_budget):
-                    result = task_scheduler.diagnostics(expression, now)
+                    result = task_scheduler.diagnostics(expression, now, utc_offset="-04:00")
+                native_trigger = {
+                    "kind": kind, "interval": interval, "duration": duration,
+                    "boundary": boundary,
+                }
+                expected = {"canonical": canonical}
+                if kind != "boot":
+                    expected["utc_offset"] = "-04:00"
+                    native_trigger["boundary_local"] = utc.display(
+                        datetime.fromisoformat(boundary))
                 self.assertEqual({
-                    "canonical": canonical,
-                    "native_trigger": {
-                        "kind": kind, "interval": interval, "duration": duration,
-                        "boundary": boundary,
-                    },
+                    **expected,
+                    "native_trigger": native_trigger,
                     "exact": exact,
                     "fallback_reason": reason,
                     "estimated_native_firings": native,
@@ -8582,103 +8597,122 @@ class TestWindowsTaskScheduling(unittest.TestCase):
             ("0 9-17 * * *", "2026-09-14T10:10:00", "2026-09-14T09:00:00"),
             ("0 9-17 * * *", "2026-09-14T17:01:00", "2026-09-15T09:00:00"),
             ("*/10 9-17 * * MON-FRI", "2026-09-14T10:10:01", "2026-09-14T09:00:00"),
-            ("*/10 9-17 * * MON-FRI", "2026-09-13T10:10:01", "2026-09-14T09:00:00"),
+            # A Sunday: the daily trigger still starts today; dispatch filters.
+            ("*/10 9-17 * * MON-FRI", "2026-09-13T10:10:01", "2026-09-13T09:00:00"),
             ("0 9-17 14 * *", "2026-09-14T10:10:00", "2026-09-14T09:00:00"),
         )
         for expression, timestamp, boundary in cases:
-            for offset in ("-07:00", "-08:00"):
+            for offset in ("-07:00", "-08:00", "+05:30"):
                 with self.subTest(expression=expression, timestamp=timestamp, offset=offset):
                     document = task_scheduler.build_task_xml(
                         command="fixture.exe", arguments="", working_dir=".",
                         schedules=[expression], description="fixture", uri="fixture",
-                        user_id="user", now=datetime.fromisoformat(timestamp + offset))
+                        user_id="user", utc_offset=offset,
+                        now=datetime.fromisoformat(timestamp + offset))
                     root = ET.fromstring(document)
                     namespace = {"t": "http://schemas.microsoft.com/windows/2004/02/mit/task"}
                     triggers = root.findall("t:Triggers/*", namespace)
                     self.assertEqual(1, len(triggers))
-                    self.assertEqual(boundary, triggers[0].findtext(
+                    expected = datetime.fromisoformat(boundary + offset).astimezone(
+                        timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                    self.assertEqual(expected, triggers[0].findtext(
                         "t:StartBoundary", namespaces=namespace))
                     self.assertEqual("true", root.findtext(
                         "t:Settings/t:StartWhenAvailable", namespaces=namespace))
 
-    def test_daily_boundary_is_local_midnight_read_back_as_written(self) -> None:
-        """A daily cron registers local midnight and reads back as midnight (#397, #609)."""
-        local_now = datetime(
-            2026, 8, 23, 16, 0,
-            tzinfo=timezone(timedelta(hours=-6)),
-        )
-
+    def test_daily_boundary_is_registered_midnight_written_as_utc(self) -> None:
+        """A daily cron registers midnight at the captured offset as a UTC instant (#397, #609)."""
+        local_now = datetime(2026, 8, 23, 16, 0, tzinfo=timezone(timedelta(hours=-6)))
         task_xml = task_scheduler.build_task_xml(
             command="agents-live.exe",
-            arguments="run --name daily",
+            arguments="run --name daily --utc-offset=-06:00",
             working_dir=r"C:\repo",
             schedules=("0 0 * * *",),
             description="daily",
             uri=r"\AgentsLive\daily",
             user_id="user",
+            utc_offset="-06:00",
             now=local_now,
         )
 
-        # Wall-clock midnight, not the UTC instant and not midnight UTC.
-        self.assertIn("<StartBoundary>2026-08-24T00:00:00</StartBoundary>", task_xml)
-        # A boundary without an offset is local time: whatever zone reads
-        # it back, it is never reinterpreted as UTC (the #397 failure).
-        for zone in (timezone.utc, timezone(timedelta(hours=-6)),
-                     timezone(timedelta(hours=9))):
-            with self.subTest(zone=zone):
-                self.assertEqual([("daily", 0, 0)],
-                                 task_scheduler._definition_signature(task_xml, zone=zone))
-                self.assertIsNone(
-                    task_scheduler.trigger_drift(task_xml, ["0 0 * * *"], zone=zone))
-        self.assertEqual(task_scheduler.LOCAL, task_scheduler.boundary_form(task_xml))
+        # Midnight at -06:00 is 06:00 UTC, written with an explicit Z so
+        # Task Scheduler cannot read it in a zone it assumes.
+        self.assertIn("<StartBoundary>2026-08-24T06:00:00Z</StartBoundary>", task_xml)
+        self.assertEqual(task_scheduler.UTC_FORM, task_scheduler.boundary_form(task_xml))
+        self.assertEqual("-06:00", task_scheduler.registered_offset(task_xml))
+        # Read back in the definition's own offset, whatever the process zone.
+        self.assertEqual([("daily", 0, 0)], task_scheduler._definition_signature(task_xml))
+        self.assertIsNone(task_scheduler.trigger_drift(task_xml, ["0 0 * * *"]))
         diagnostics = task_scheduler.diagnostics(
-            "0 0 * * *", local_now, registered=task_xml)
-        self.assertEqual("2026-08-24T00:00:00", diagnostics["native_trigger"]["boundary"])
+            "0 0 * * *", datetime(2026, 8, 23, 22, 0, tzinfo=timezone.utc),
+            registered=task_xml)
+        self.assertEqual("-06:00", diagnostics["utc_offset"])
+        self.assertEqual("2026-08-24T06:00:00Z", diagnostics["native_trigger"]["boundary"])
         self.assertTrue(diagnostics["exact"])
-        self.assertEqual({"boundary": ["2026-08-24T00:00:00"], "matches": True,
+        self.assertEqual({"boundary": ["2026-08-24T06:00:00Z"], "matches": True,
                           "drift": None}, diagnostics["registered_trigger"])
 
-    def test_hour_aligned_schedule_keeps_local_time_across_daylight_saving_end(self) -> None:
-        """A trigger registered in daylight time still fires on the cron after it ends (#609)."""
+        # A boundary without an offset, as written before #609, is read in
+        # whatever zone Task Scheduler assumes, so it reports drift.
+        legacy = task_xml.replace("2026-08-24T06:00:00Z", "2026-08-24T00:00:00")
+        self.assertEqual(task_scheduler.LOCAL, task_scheduler.boundary_form(legacy))
+        self.assertIn("no UTC offset", task_scheduler.trigger_drift(legacy, ["0 0 * * *"]))
+        self.assertNotEqual(task_scheduler.desired_trigger_identity(["0 0 * * *"]),
+                            task_scheduler.registered_trigger_identity(legacy))
+
+    def test_registered_offset_is_absolute_across_daylight_saving_and_half_hour_zones(self) -> None:
+        """Once registered, a trigger is an absolute UTC time (#609).
+
+        Neither a daylight saving change nor a different process zone
+        moves it; the user stops and starts the agent to re-anchor it.
+        """
         schedule = "0 */12 * * *"
-        daylight = timezone(timedelta(hours=-4))
-        standard = timezone(timedelta(hours=-5))
-        registered_at = datetime(2026, 10, 29, 10, 0, tzinfo=daylight)
-        document = task_scheduler.build_task_xml(
-            command="agents-live.exe", arguments="run --name twice-daily",
-            working_dir=r"C:\repo", schedules=[schedule], description="fixture",
-            uri=r"\AgentsLive\fixture", user_id="user", now=registered_at)
+        for offset, registered_at, boundary in (
+            ("-04:00", datetime(2026, 10, 29, 10, 0, tzinfo=timezone(timedelta(hours=-4))),
+             "2026-10-29T04:00:00Z"),
+            ("+05:30", datetime(2026, 10, 29, 10, 0, tzinfo=timezone(timedelta(hours=5, minutes=30))),
+             "2026-10-28T18:30:00Z"),
+        ):
+            with self.subTest(offset=offset):
+                document = task_scheduler.build_task_xml(
+                    command="agents-live.exe",
+                    arguments=f"run --name twice-daily --utc-offset={offset}",
+                    working_dir=r"C:\repo", schedules=[schedule], description="fixture",
+                    uri=r"\AgentsLive\fixture", user_id="user", utc_offset=offset,
+                    now=registered_at)
+                self.assertEqual([boundary], task_scheduler.registered_boundaries(document))
+                # A different process zone (daylight time ended, or the
+                # machine moved) changes nothing about the registration.
+                with mock.patch.object(task_scheduler.utc, "current_offset",
+                                       return_value="-05:00"):
+                    self.assertIsNone(task_scheduler.trigger_drift(document, [schedule]))
+                    self.assertEqual(
+                        task_scheduler.desired_trigger_identity([schedule]),
+                        task_scheduler.registered_trigger_identity(document))
+                    status = task_scheduler.diagnostics(
+                        schedule, datetime(2026, 11, 22, 10, 0, tzinfo=timezone.utc),
+                        registered=document)
+                self.assertEqual(offset, status["utc_offset"])
+                self.assertTrue(status["registered_trigger"]["matches"])
+                # Native wakes are 12 hours apart from the UTC boundary and
+                # each reads as 00:00 or 12:00 at the registered offset.
+                trigger = task_scheduler.translate(schedule)[0]
+                frame = task_scheduler._frame_zone(offset)
+                after = datetime(2026, 11, 2, tzinfo=frame)
+                due, native = task_scheduler.simulate_firings(
+                    trigger, schedule, after, after + timedelta(days=1, minutes=-1))
+                self.assertEqual([(0, 0), (12, 0)], [(item.hour, item.minute) for item in native])
+                self.assertEqual(due, native)
 
-        self.assertEqual(["2026-10-29T00:00:00"],
-                         task_scheduler.registered_boundaries(document))
-        # Read after daylight time ended: still 00:00 and 12:00 local, the
-        # minutes dispatch accepts as due.
-        self.assertEqual(task_scheduler.trigger_signature([schedule]),
-                         task_scheduler._definition_signature(document, zone=standard))
-        self.assertIsNone(task_scheduler.trigger_drift(document, [schedule], zone=standard))
-        trigger = task_scheduler.translate(schedule)[0]
-        after = datetime(2026, 11, 2, tzinfo=standard)
-        due, native = task_scheduler.simulate_firings(
-            trigger, schedule, after, after + timedelta(days=1, minutes=-1))
-        self.assertEqual([(0, 0), (12, 0)], [(item.hour, item.minute) for item in native])
-        self.assertEqual(due, native)
-
-        # The shape registered before this fix: the same instant pinned to
-        # the daylight offset reads as 23:00 once the offset changes.
-        pinned = document.replace(
-            "<StartBoundary>2026-10-29T00:00:00</StartBoundary>",
-            "<StartBoundary>2026-10-29T00:00:00-04:00</StartBoundary>")
-        self.assertEqual([("daily", 23, 0, 720, 1440)],
-                         task_scheduler._definition_signature(pinned, zone=standard))
-        self.assertIn("pinned to a UTC offset",
-                      task_scheduler.trigger_drift(pinned, [schedule], zone=standard))
-        self.assertNotEqual(task_scheduler.desired_trigger_identity([schedule]),
-                            task_scheduler.registered_trigger_identity(pinned))
+        # The shape registered by the first #609 attempt: pinned to a
+        # non-UTC offset. It reports drift and is registered again.
+        pinned = document.replace(boundary, "2026-10-29T00:00:00+05:30")
+        self.assertEqual(task_scheduler.PINNED, task_scheduler.boundary_form(pinned))
+        self.assertIn("non-UTC offset", task_scheduler.trigger_drift(pinned, [schedule]))
         status = task_scheduler.diagnostics(
-            schedule, datetime(2026, 11, 22, 10, 0, tzinfo=standard), registered=pinned)
+            schedule, datetime(2026, 11, 22, 10, 0, tzinfo=timezone.utc), registered=pinned)
         self.assertFalse(status["exact"])
         self.assertFalse(status["registered_trigger"]["matches"])
-        self.assertEqual(["2026-10-29T00:00:00-04:00"], status["registered_trigger"]["boundary"])
 
     def test_each_cron_expression_creates_exactly_one_trigger(self) -> None:
         """Every valid cron expression must compile to exactly one native trigger (#488)."""
@@ -8745,8 +8779,8 @@ class TestWindowsTaskScheduling(unittest.TestCase):
             ("0 */12 * * *", "daily", 0, 0, "PT12H", "P1D", True),
             ("0 */5 * * *", "daily", 0, 0, "PT5H", "P1D", True),
             ("*/15 * * * *", "daily", 0, 0, "PT15M", "P1D", True),
-            ("15 9 * * MON-FRI", "weekly", 9, 15, None, None, True),
-            ("0 9 1 * *", "monthly", 9, 0, None, None, True),
+            ("15 9 * * MON-FRI", "daily", 9, 15, None, None, False),
+            ("0 9 1 * *", "daily", 9, 0, None, None, False),
             ("@daily", "daily", 0, 0, None, None, True),
         ]
         for expr, expected_kind, h, m, interval, duration, exact in cases:
@@ -8789,49 +8823,47 @@ class TestWindowsTaskScheduling(unittest.TestCase):
         self.assertEqual(10, len(native_hours))
         self.assertTrue(all(8 <= t.hour <= 17 for t in native_hours))
 
-        # */10 9-17 * * MON-FRI does not wake on weekends or overnight
+        # */10 9-17 * * MON-FRI wakes daily in the window; dispatch skips
+        # weekends, because day restrictions are checked at dispatch (#609)
         trig_weekday = task_scheduler.translate("*/10 9-17 * * MON-FRI")[0]
-        self.assertEqual("weekly", trig_weekday["kind"])
-        self.assertEqual((1, 2, 3, 4, 5), trig_weekday["weekdays"])
+        self.assertEqual("daily", trig_weekday["kind"])
+        self.assertFalse(trig_weekday["exact"])
         self.assertEqual(9, trig_weekday["hour"])
         self.assertEqual("PT10M", trig_weekday["interval"])
-        _, native_wk = task_scheduler.simulate_firings(
+        due_wk, native_wk = task_scheduler.simulate_firings(
             trig_weekday, "*/10 9-17 * * MON-FRI", datetime(2026, 9, 7, 0, 0), datetime(2026, 9, 13, 23, 59))
-        self.assertTrue(all(t.weekday() < 5 for t in native_wk), "No weekend wakeups")
+        self.assertTrue(all(t.weekday() < 5 for t in due_wk), "No weekend due firings")
         self.assertTrue(all(9 <= t.hour <= 17 for t in native_wk), "No overnight wakeups")
 
     def test_calendar_edge_cases_and_normalization(self) -> None:
-        """Day-of-month/day-of-week OR, months, leap days, and Sunday normalization (#488)."""
-        # Both DOM and DOW restricted -> daily trigger with dispatch filtering (OR semantics)
-        trig_or = task_scheduler.translate("0 0 1,15 * MON")[0]
-        self.assertEqual("daily", trig_or["kind"])
-        self.assertFalse(trig_or["exact"])
-        self.assertIn("combined day-of-month and day-of-week", trig_or["fallback_reason"])
-
-        # Selected months
-        trig_months = task_scheduler.translate("0 9 1 JAN,JUN *")[0]
-        self.assertEqual("monthly", trig_months["kind"])
-        self.assertEqual((1, 6), trig_months["months"])
-        self.assertEqual((1,), trig_months["days"])
-        self.assertTrue(trig_months["exact"])
-
-        # Leap day (day 29 of Feb)
-        trig_leap = task_scheduler.translate("0 0 29 2 *")[0]
-        self.assertEqual("monthly", trig_leap["kind"])
-        self.assertEqual((2,), trig_leap["months"])
-        self.assertEqual((29,), trig_leap["days"])
-
-        # Month end (day 31)
-        trig_31 = task_scheduler.translate("0 0 31 * *")[0]
-        self.assertEqual("monthly", trig_31["kind"])
-        self.assertEqual((31,), trig_31["days"])
+        """Day, weekday and month restrictions wake daily and filter at dispatch (#488, #609)."""
+        # Task Scheduler's weekly and monthly triggers pick calendar days in
+        # its own zone, so any day restriction is a daily trigger in the
+        # registered frame and dispatch decides which days are due.
+        cases = (
+            ("0 0 1,15 * MON", datetime(2026, 8, 31), datetime(2026, 9, 16),
+             [datetime(2026, 8, 31), datetime(2026, 9, 1), datetime(2026, 9, 7),
+              datetime(2026, 9, 14), datetime(2026, 9, 15)]),
+            ("0 9 1 JAN,JUN *", datetime(2026, 5, 31), datetime(2026, 6, 3),
+             [datetime(2026, 6, 1, 9)]),
+            ("0 0 29 2 *", datetime(2028, 2, 27), datetime(2028, 3, 2),
+             [datetime(2028, 2, 29)]),
+            ("0 0 31 * *", datetime(2026, 9, 29), datetime(2026, 10, 2),
+             []),
+        )
+        for expression, start, end, expected in cases:
+            with self.subTest(expression=expression):
+                trigger = task_scheduler.translate(expression)[0]
+                self.assertEqual("daily", trigger["kind"])
+                self.assertFalse(trigger["exact"])
+                self.assertIn("checked at dispatch", trigger["fallback_reason"])
+                due, native = task_scheduler.simulate_firings(trigger, expression, start, end)
+                self.assertEqual(expected, due)
+                self.assertTrue(set(due) <= set(native))
 
         # Sunday 0 and 7 identical
-        trig_sun0 = task_scheduler.translate("0 0 * * 0")[0]
-        trig_sun7 = task_scheduler.translate("0 0 * * 7")[0]
-        self.assertEqual((0,), trig_sun0["weekdays"])
-        self.assertEqual((0,), trig_sun7["weekdays"])
-        self.assertEqual(trig_sun0, trig_sun7)
+        self.assertEqual(task_scheduler.translate("0 0 * * 0"),
+                         task_scheduler.translate("0 0 * * 7"))
 
     def test_boundary_prevents_duplicate_midnight_firing(self) -> None:
         """Bounded repetition must not fire twice at the midnight boundary (#488)."""

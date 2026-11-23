@@ -38,6 +38,17 @@ class WatchSyntaxError(ValueError):
 class Schedule:
     canonical: str
 
+    @property
+    def expression(self) -> str:
+        """The five cron fields, with any ``@`` keyword other than ``@reboot`` expanded."""
+        return {
+            "@yearly": "0 0 1 1 *",
+            "@monthly": "0 0 1 * *",
+            "@weekly": "0 0 * * 0",
+            "@daily": "0 0 * * *",
+            "@hourly": "0 * * * *",
+        }.get(self.canonical, self.canonical)
+
     def matches(self, moment: datetime) -> bool:
         expression = {
             "@yearly": "0 0 1 1 *",
@@ -93,11 +104,7 @@ class Schedule:
 
     def slots(self, start: datetime, end: datetime, *, zone=None):
         """Enumerate calendar candidates in UTC, including both DST folds."""
-        expression = {
-            "@yearly": "0 0 1 1 *", "@monthly": "0 0 1 * *",
-            "@weekly": "0 0 * * 0", "@daily": "0 0 * * *",
-            "@hourly": "0 * * * *",
-        }.get(self.canonical, self.canonical)
+        expression = self.expression
         if expression == "@reboot":
             return
         values = _schedule_values(expression)
