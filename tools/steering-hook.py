@@ -9,8 +9,11 @@ Modes (hook payload JSON on stdin, hook output JSON on stdout):
 
 - ``transform``: Copilot ``userPromptTransformed``. Appends the steering
   reminder to the model-facing content of every user message.
-- ``stop``: Copilot ``agentStop``. Forces one correction turn when the first
-  reply text after the latest user message lacks the steering line.
+- ``stop``: Copilot ``agentStop``. Forces one correction turn when the final
+  assistant message after the latest user message (the text after the last
+  tool call, or the only message in a tool-free turn) lacks the steering
+  line. Earlier text collapses with the tool calls and is hidden from the
+  developer, so only the final message counts.
 - ``claude-prompt``: Claude Code ``UserPromptSubmit``. Adds the reminder as
   additional context.
 
@@ -26,10 +29,11 @@ from pathlib import Path
 MARKER = "<steering-reminder>"
 REMINDER = (
     f"{MARKER}Repository protocol (AGENTS.md, Continuous Development and "
-    "Learning): begin your reply to this message with one line, "
-    "`Steering: <classification>; new goals: <list or none>; still open: "
-    "<list or none>; continue until: <condition>.` Then act."
-    "</steering-reminder>"
+    "Learning): begin your final message for this reply (the text after "
+    "your last tool call) with one line, `Steering: <classification>; new "
+    "goals: <list or none>; still open: <list or none>; continue until: "
+    "<condition>.` and put the answers in that final message; earlier text "
+    "is hidden with the tool calls.</steering-reminder>"
 )
 STEERING_LINE = re.compile(r"^[\s>*_`#-]*Steering:", re.IGNORECASE)
 
@@ -41,8 +45,12 @@ def transform(payload: dict) -> dict:
     return {"modifiedTransformedPrompt": f"{content}\n\n{REMINDER}"}
 
 
-def reply_texts(transcript: Path) -> list[str]:
-    """Return the non-empty assistant texts after the last user message."""
+def final_message(transcript: Path) -> str | None:
+    """Return the final assistant text after the last user message.
+
+    ``None`` means there is no final message to judge: no reply yet, or the
+    reply ended on a tool call or with empty text.
+    """
     events = []
     with transcript.open(encoding="utf-8") as stream:
         for line in stream:
@@ -55,16 +63,17 @@ def reply_texts(transcript: Path) -> list[str]:
         if isinstance(event, dict) and event.get("type") == "user.message":
             last_user = index
     if last_user is None:
-        return []
-    texts = []
+        return None
+    final = None
     for event in events[last_user + 1:]:
-        if not isinstance(event, dict) or event.get("type") != "assistant.message":
-            continue
-        data = event.get("data")
-        content = data.get("content") if isinstance(data, dict) else None
-        if isinstance(content, str) and content.strip():
-            texts.append(content)
-    return texts
+        if isinstance(event, dict) and event.get("type") == "assistant.message":
+            final = event.get("data")
+    if not isinstance(final, dict) or final.get("toolRequests"):
+        return None
+    content = final.get("content")
+    if not isinstance(content, str) or not content.strip():
+        return None
+    return content
 
 
 def _opens_with_steering(text: str) -> bool:
@@ -79,22 +88,21 @@ def stop(payload: dict) -> dict:
     if not isinstance(path, str) or not path:
         return {}
     try:
-        texts = reply_texts(Path(path))
+        text = final_message(Path(path))
     except OSError:
         return {}
-    # The Copilot app can record the text sent with a reply's first tool call
-    # as empty, so the opening steering line may be missing from the
-    # transcript; the final reply restating it also satisfies the protocol.
-    if not texts or _opens_with_steering(texts[0]) or _opens_with_steering(texts[-1]):
+    if text is None or _opens_with_steering(text):
         return {}
     return {
         "decision": "block",
         "reason": (
-            "Your reply to the latest user message did not begin with the "
-            "required steering line. Reply now starting with `Steering: "
-            "<classification>; new goals: <list or none>; still open: <list "
-            "or none>; continue until: <condition>.` and correct any work "
-            "that classification changes."
+            "Your final message to the latest user message did not begin "
+            "with the required steering line. Text before your last tool "
+            "call is hidden from the developer. Reply now with one message, "
+            "without tool calls, starting with `Steering: <classification>; "
+            "new goals: <list or none>; still open: <list or none>; continue "
+            "until: <condition>.`, restate the answers there and correct any "
+            "work that classification changes."
         ),
     }
 
