@@ -29,7 +29,8 @@ history is retained in the source repository.
   assumed earlier, so after a daylight saving or time zone change every firing
   arrived off its slot and dispatch skipped it as `not-due`. Local time is now
   read once, when an agent's wake entry is registered: the UTC offset in effect
-  then is stored on the entry as `--utc-offset`, and from then on the schedule
+  then is stored on the entry as `--utc-offset=<offset>` (one argument, so a
+  negative offset parses on every supported Python), and from then on the schedule
   is a fixed UTC time. Daylight saving changes and zone switches do not move
   it; stop and start the agent to re-anchor it, and a lost or rebuilt entry
   takes the current offset. Task Scheduler start boundaries are written in UTC

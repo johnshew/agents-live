@@ -7,6 +7,7 @@ import time
 from collections.abc import Sequence
 from pathlib import Path
 
+from .. import utc
 from ..values import (
     ChildResult,
     Health,
@@ -107,7 +108,7 @@ class MemoryHost:
         document: dict[str, str] = {"target": subscription.target}
         if subscription.utc_offset is not None:
             fingerprint += ":utc" + subscription.utc_offset
-            document["utc_offset"] = "--utc-offset " + subscription.utc_offset
+            document["utc_offset"] = utc.argument(subscription.utc_offset)
         watcher_argv = (
             "agents-live", "internal", "watch-loop", subscription.target,
         ) if subscription.kind == "watch" else ()

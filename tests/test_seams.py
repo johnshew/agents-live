@@ -2523,8 +2523,7 @@ class TestStartedState(TempRepository):
                 "--name",
                 spec.identifier,
                 "--quiet",
-                "--utc-offset",
-                utc.current_offset(),
+                utc.argument(utc.current_offset()),
             ],
             rendered["argv"],
         )
@@ -8626,7 +8625,7 @@ class TestWindowsTaskScheduling(unittest.TestCase):
         local_now = datetime(2026, 8, 23, 16, 0, tzinfo=timezone(timedelta(hours=-6)))
         task_xml = task_scheduler.build_task_xml(
             command="agents-live.exe",
-            arguments="run --name daily --utc-offset -06:00",
+            arguments="run --name daily --utc-offset=-06:00",
             working_dir=r"C:\repo",
             schedules=("0 0 * * *",),
             description="daily",
@@ -8677,7 +8676,7 @@ class TestWindowsTaskScheduling(unittest.TestCase):
             with self.subTest(offset=offset):
                 document = task_scheduler.build_task_xml(
                     command="agents-live.exe",
-                    arguments=f"run --name twice-daily --utc-offset {offset}",
+                    arguments=f"run --name twice-daily --utc-offset={offset}",
                     working_dir=r"C:\repo", schedules=[schedule], description="fixture",
                     uri=r"\AgentsLive\fixture", user_id="user", utc_offset=offset,
                     now=registered_at)

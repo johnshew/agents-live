@@ -14,8 +14,17 @@ from datetime import UTC, datetime, timedelta, timezone
 
 FLAG = "--utc-offset"
 _OFFSET = re.compile(r"([+-])(\d{2}):(\d{2})")
-# Finds the flag in a crontab line, a command line or a JSON rendering.
-_IN_TEXT = re.compile(r"--utc-offset[\s\"',\\]+([+-]\d{2}:\d{2})(?!\d)")
+# Finds the argument in a crontab line, a command line or a JSON rendering.
+_IN_TEXT = re.compile(r"--utc-offset=([+-]\d{2}:\d{2})(?!\d)")
+
+
+def argument(offset: str) -> str:
+    """The single ``--utc-offset=<offset>`` argument a wake entry passes.
+
+    Joined with ``=`` because argparse before Python 3.14 reads a separate
+    negative value such as ``-04:00`` as an option and refuses the run.
+    """
+    return f"{FLAG}={offset}"
 
 
 def format_offset(delta: timedelta) -> str:

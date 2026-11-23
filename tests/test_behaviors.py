@@ -31,7 +31,7 @@ import unittest
 import venv
 import warnings
 import zipfile
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone, tzinfo
 from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
@@ -56,7 +56,7 @@ from agents_live.obs.events import append as append_event
 from agents_live.agent.values import McpServer, RawOutput, Request, ResolvedSpec
 from agents_live.dispatch import Firing, dispatch
 from agents_live.runtime import ChildResult, ProcessRef, Subscription
-from agents_live.runtime import artifacts
+from agents_live.runtime import artifacts, utc
 from agents_live.runtime.hosts import crontab as crontasks
 from agents_live.runtime.hosts import system as hostruntime
 from agents_live.runtime.hosts import windows as windowshost
@@ -530,7 +530,7 @@ class TestOwnershipEnforcement(TempRepository):
             scope=f"repo:{self.root.resolve()}", target=f"agent:{spec.identifier}",
             kind="schedule", trigger="0 */12 * * *").key
         current = task_scheduler.build_task_xml(
-            command="agents-live.exe", arguments="run --utc-offset -04:00",
+            command="agents-live.exe", arguments="run --utc-offset=-04:00",
             working_dir=str(self.root),
             schedules=["0 */12 * * *"], description="fixture", uri="fixture",
             user_id="user", utc_offset="-04:00",
@@ -699,7 +699,7 @@ class TestCrontabTriggerStore(TempRepository):
             kind="schedule", trigger="12 3 * * *")
         desired = PosixHost().render(replace(subscription, utc_offset="+05:30"))
         self.assertTrue(desired.rendered.startswith("12 * * * * "), desired.rendered)
-        self.assertIn("--utc-offset +05:30", desired.rendered)
+        self.assertIn("--utc-offset=+05:30", desired.rendered)
         self.store.install(desired)
         self.assertEqual([desired.fingerprint],
                          [item.fingerprint for item in self.store.list()])
@@ -719,6 +719,147 @@ class TestCrontabTriggerStore(TempRepository):
         legacy = self.store.list()
         self.assertTrue(legacy[0].rendered.startswith("12 3 * * * "))
         self.assertNotEqual(desired.fingerprint, legacy[0].fingerprint)
+
+
+def _posix_native_wakes(rendered: str, scheduler: tzinfo,
+                        start: datetime, hours: int) -> list[datetime]:
+    """UTC minutes a cron daemon running in *scheduler* runs *rendered* at."""
+    from agents_live.runtime import parse_schedule
+
+    schedule = parse_schedule(" ".join(rendered.split()[:5]))
+    minutes = (start + timedelta(minutes=step) for step in range(hours * 60))
+    return [moment for moment in minutes
+            if schedule.matches(moment.astimezone(scheduler))]
+
+
+def _windows_native_wakes(document: str, scheduler: tzinfo,
+                          start: datetime, hours: int) -> list[datetime]:
+    """UTC minutes Task Scheduler in *scheduler* starts a daily trigger at.
+
+    A boundary without ``Z`` is read in the scheduler's own zone, which
+    is how #609 moved firings when that zone differed from the process's.
+    """
+    import xml.etree.ElementTree as ET
+
+    ns = {"t": "http://schemas.microsoft.com/windows/2004/02/mit/task"}
+    end = start + timedelta(hours=hours)
+    wakes: set[datetime] = set()
+    for trigger in ET.fromstring(document).iterfind(".//t:CalendarTrigger", ns):
+        text = trigger.findtext("t:StartBoundary", namespaces=ns)
+        boundary = (datetime.fromisoformat(text.removesuffix("Z")).replace(tzinfo=UTC)
+                    if text.endswith("Z") else
+                    datetime.fromisoformat(text).replace(tzinfo=scheduler))
+        interval = trigger.findtext("t:Repetition/t:Interval", namespaces=ns)
+        duration = trigger.findtext("t:Repetition/t:Duration", namespaces=ns)
+        step = _iso_minutes(interval) if interval else None
+        span = _iso_minutes(duration) if duration else 1
+        day = boundary
+        while day < end:
+            offsets = range(0, span, step) if step else (0,)
+            wakes.update(day + timedelta(minutes=item) for item in offsets)
+            day += timedelta(days=1)
+    return sorted(moment.astimezone(UTC) for moment in wakes if start <= moment < end)
+
+
+def _iso_minutes(text: str) -> int:
+    match = re.fullmatch(r"P(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?)?", text)
+    days, hours, minutes = (int(item or 0) for item in match.groups())
+    return days * 1440 + hours * 60 + minutes
+
+
+class TestClockWakesAcrossZones(TempRepository):
+    """Native wakes and the dispatch due check when the scheduler's zone
+    differs from the zone the agent was registered in (#609)."""
+
+    START = datetime(2026, 11, 2, 0, 0, tzinfo=UTC)
+
+    def _subscription(self, cron: str, offset: str) -> Subscription:
+        from dataclasses import replace
+
+        return replace(Subscription.create(
+            scope=f"repo:{self.root}", target="agent:sample",
+            kind="schedule", trigger=cron), utc_offset=offset)
+
+    def _due(self, wakes: list[datetime], cron: str, offset: str) -> list[datetime]:
+        """The wakes dispatch accepts, by the rule dispatch applies."""
+        from agents_live.runtime import parse_schedule, utc
+
+        schedule = parse_schedule(cron)
+        return [moment for moment in wakes
+                if schedule.matches(moment.astimezone(utc.zone(offset)))]
+
+    def _windows_document(self, cron: str, offset: str) -> str:
+        from agents_live.runtime.hosts import task_scheduler
+
+        return task_scheduler.build_task_xml(
+            command="agents-live.exe", arguments="run --name sample",
+            working_dir=str(self.root), schedules=[cron], description="sample",
+            uri="\\agents-live\\sample", user_id="user", now=self.START,
+            utc_offset=offset)
+
+    def test_generated_clock_commands_parse_on_every_supported_python(self) -> None:
+        """argparse before 3.14 reads a separate ``-04:00`` as an option."""
+        from agents_live.cli.main import main as cli_main
+        from agents_live.cli.commands import run as run_command
+
+        for offset in ("-04:00", "+05:30", "+00:00"):
+            subscription = self._subscription("12 3 * * *", offset)
+            posix = PosixHost().render(subscription).rendered
+            command = posix.split(" && ", 1)[1].removesuffix(" 2>&1")
+            windows = json.loads(windowshost.WindowsHost().render(subscription).rendered)
+            for host, argv in (("posix", shlex.split(command)[1:]),
+                               ("windows", windows["argv"][1:])):
+                with self.subTest(host=host, offset=offset):
+                    firings = []
+
+                    def dispatch(firing):
+                        firings.append(firing)
+                        return mock.Mock(ok=True, text="")
+
+                    with mock.patch.dict(os.environ), \
+                            mock.patch.object(run_command, "dispatch", dispatch):
+                        os.environ.pop("AGENTS_LIVE_JSON", None)
+                        self.assertEqual(0, cli_main(list(argv)))
+                    self.assertEqual(1, len(firings))
+                    self.assertEqual(offset, firings[0].utc_offset)
+                    self.assertEqual("clock", firings[0].origin)
+
+    def test_windows_wakes_land_on_the_due_minute_in_any_scheduler_zone(self) -> None:
+        for offset, scheduler in (("+05:30", timezone(timedelta(hours=-7))),
+                                  ("-04:00", timezone(timedelta(hours=1))),
+                                  ("+00:00", timezone(timedelta(hours=5, minutes=45)))):
+            for cron in ("12 3 * * *", "30 9-17/4 * * *", "0 6 * * 1"):
+                with self.subTest(offset=offset, scheduler=scheduler, cron=cron):
+                    wakes = _windows_native_wakes(
+                        self._windows_document(cron, offset), scheduler, self.START, 24 * 8)
+                    expected = _posix_native_wakes(
+                        cron, utc.zone(offset), self.START, 24 * 8)
+                    self.assertTrue(expected)
+                    self.assertEqual(expected, self._due(wakes, cron, offset))
+
+    def test_posix_hourly_wakes_cover_whole_hour_zone_differences(self) -> None:
+        for offset, scheduler in (("-04:00", UTC),
+                                  ("+05:30", timezone(timedelta(hours=1, minutes=30)))):
+            cron = "12 3 * * *"
+            with self.subTest(offset=offset, scheduler=scheduler):
+                rendered = PosixHost().render(self._subscription(cron, offset)).rendered
+                wakes = _posix_native_wakes(rendered, scheduler, self.START, 48)
+                self.assertEqual(48, len(wakes))
+                self.assertEqual(
+                    _posix_native_wakes(cron, utc.zone(offset), self.START, 48),
+                    self._due(wakes, cron, offset))
+
+    @unittest.expectedFailure
+    def test_posix_hourly_wakes_miss_a_fractional_hour_zone_difference(self) -> None:
+        """Known gap held for a developer decision: the hourly line keeps the
+        raw minute, so a daemon zone that differs from the registration
+        offset by a fractional hour never wakes on the due minute."""
+        cron, offset = "12 3 * * *", "+05:30"
+        rendered = PosixHost().render(self._subscription(cron, offset)).rendered
+        wakes = _posix_native_wakes(rendered, UTC, self.START, 48)
+        self.assertEqual(
+            [datetime(2026, 11, 2, 21, 42, tzinfo=UTC)],
+            self._due(wakes, cron, offset))
 
 
 class TestHostMaintenanceEntries(TempRepository):

@@ -265,7 +265,7 @@ class WindowsHost:
                     "--metadata", marker, "--name", target, "--quiet",
                 ]
             if subscription.utc_offset is not None:
-                argv += [utc.FLAG, subscription.utc_offset]
+                argv.append(utc.argument(subscription.utc_offset))
             watcher_argv: tuple[str, ...] = ()
         else:
             watch = parse_watch(subscription.trigger)
@@ -322,9 +322,9 @@ def _action_argv(command: str, arguments: str) -> list[str]:
 
 def _argv_offset(argv: Sequence[str]) -> str | None:
     """The ``--utc-offset`` value in a rendered action, or None."""
-    for index, token in enumerate(argv[:-1]):
-        if token == utc.FLAG:
-            return argv[index + 1]
+    for token in argv:
+        if token.startswith(utc.FLAG + "="):
+            return token.partition("=")[2]
     return None
 
 

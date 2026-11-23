@@ -123,7 +123,7 @@ class PosixHost:
                 # cron daemon's own time zone never moves a firing (#609).
                 minute = parse_schedule(subscription.trigger).expression.split()[0]
                 trigger = f"{minute} * * * *"
-                argv += [utc.FLAG, subscription.utc_offset]
+                argv.append(utc.argument(subscription.utc_offset))
                 fingerprint += _utc_suffix(subscription.utc_offset)
             watcher_argv: tuple[str, ...] = ()
         else:
