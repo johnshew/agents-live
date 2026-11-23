@@ -215,9 +215,16 @@ or app child sessions. They add no commit, merge, release or runtime authority.
   waiting for an answer.
 - **Run the heartbeat as its own worker.** Use a same-session automation where
   the harness offers one. Otherwise start a `Heartbeat` child session whose
-  only job is to run `uv run --script tools/coordinator-check.py` every 15 to
-  20 minutes and message the coordinator with its output, only when it prints
-  something. It never acts; to change what it checks, change the script.
+  only job is to run `uv run --script tools/coordinator-check.py` about every
+  10 minutes and also read the cross-team coordination issue for new posts
+  from other coordinators. It messages the coordinator only when the check
+  prints something or the issue has a new post. For the issue read it keeps a
+  high-water mark taken from the newest comment it actually saw, not from the
+  clock, and treats a comment as new when either its created or its updated
+  time is past that mark. It excludes only its own coordinator's posts, and it
+  flags a coordinator posting for the first time and any ask addressed to all
+  coordinators. It never acts and never posts to the issue; to change what it
+  checks, change the script.
   Retire it when the goals are met.
 - **Name the workspace in every brief.** State the exact worktree and tested
   head the delegate may read, edit or test, and the excluded locations (for
@@ -566,7 +573,7 @@ Fold into Commit hygiene at the next consolidation of this document.
 - Update-ID: d121e4f7-57ac-40d1-bfc7-deb5e459d511
 - Recorded-UTC: 2026-11-23T19:53:51Z
 - Kind: addition
-- Topics: orchestration, detached processes, hidden windows, coordinator recovery, blocked work
+- Topics: orchestration, detached processes, hidden windows, coordinator recovery, blocked work, heartbeat
 - Workstream: worker-launch practices adoption
 - Target: .agents/development.md, Orchestrating delegates and child sessions; new tools/run-hidden.py; compared origin/main 43e70b5
 - Source-Session: Copilot app worker session 2026-11-23 (harness history)
@@ -582,7 +589,12 @@ When every tool call in a coordinator session hangs, the coordinator stops
 retrying and the developer starts a fresh coordinator session that resumes
 from the prior session's record. A coordinator or worker that is blocked asks
 the other coordinators for unblocking strategies on the cross-team coordination
-issue and meanwhile switches to other authorized, unblocked work.
+issue and meanwhile switches to other authorized, unblocked work. A heartbeat
+worker runs about every 10 minutes instead of every 15 to 20, and also reads
+the cross-team coordination issue, reporting only new posts. Its issue read
+tracks the newest comment it saw (created or updated time), excludes only its
+own coordinator's posts and flags new coordinators and asks to all
+coordinators.
 
 #### Evidence
 - User direction, 2026-11-23: the developer chose to adopt these two
@@ -596,6 +608,14 @@ issue and meanwhile switches to other authorized, unblocked work.
 - User direction, 2026-11-23, added to the same change: "if you gets blocked
   you can talk to the other about good strategies to get unblocked and if you
   do get blocked work on other works so you keep making progress".
+- User direction, 2026-11-23: "every 10 minutes might be better", confirmed
+  for all coordinators, with the heartbeat also reading the cross-team
+  coordination issue for new posts.
+- Observation, 2026-11-24: a heartbeat reported no new posts on the
+  coordination issue while six posts from other coordinators, including two
+  asks addressed to all coordinators, were unread. The developer directed the
+  high-water mark, created-or-updated check, own-posts-only exclusion and
+  flagging rules.
 
 #### Previous Knowledge
 The guide pointed long no-reasoning commands at the agent shell's async
