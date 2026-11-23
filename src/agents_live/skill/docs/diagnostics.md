@@ -1,7 +1,7 @@
 ---
 title: Diagnostics
 description: Diagnose definitions, convergence, dispatch, and WSL liveness
-ms.date: 2026-10-09
+ms.date: 2026-11-23
 ms.topic: troubleshooting
 ---
 
@@ -122,12 +122,15 @@ Partial convergence closes the known interval until another successful
 observation. There is no claim before the first retained observation, after
 withdrawal, or outside retained history. Multiple schedules due in one minute
 produce one expected agent slot; actual attempts keep their own run IDs.
-Queries use the owning host's local scheduler timezone, including DST minutes.
-`clock_coverage` reports the retained baseline, omits unknown convergence or
-changed-timezone intervals, and disables missed-fire inference when structured
-records are damaged. The recorded host-timezone signature must match the reader;
-query imported history on its owning host rather than assuming a different local
-timezone. This adds no catch-up launches,
+`clock_coverage` reports the retained baseline.
+Expected slots follow each agent's registered UTC offset, so a later host time
+zone or daylight saving change neither hides nor invents slots. Observations
+recorded before that offset was kept use the owning host's local scheduler
+timezone, including DST minutes; for those, `clock_coverage` omits unknown
+convergence or changed-timezone intervals, and the recorded host-timezone
+signature must match the reader. Query imported history on its owning host
+rather than assuming a different local timezone. Missed-fire inference is
+disabled when structured records are damaged. This adds no catch-up launches,
 scheduler-policy changes or span correlation.
 Ordinary log queries do not project clock expectations. Queries referencing
 clock views are discovered by the SQL parser, including joins, CTEs and quoted

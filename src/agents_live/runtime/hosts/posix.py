@@ -7,7 +7,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from ...legacy import artifacts as legacy_artifacts
-from .. import artifacts
+from .. import artifacts, utc
 from ..grammars import parse_schedule, parse_watch
 from ..values import Health, InstalledTrigger, RenderedSubscription, Subscription
 from .processes import LocalChildRunner, LocalProcesses
@@ -39,12 +39,14 @@ class PosixTriggerStore:
         for line in lines:
             metadata = artifacts.from_rendered(line)
             if metadata is not None:
+                offset = utc.offset_in(line)
                 found.append(InstalledTrigger(
                     metadata.id,
                     metadata.scope,
                     _kind(line),
                     artifacts.PREFIX + metadata.id + (
-                        ":supervised" if "watch-supervise" in shlex.split(line) else ""),
+                        ":supervised" if "watch-supervise" in shlex.split(line) else "")
+                    + (_utc_suffix(offset) if offset else ""),
                     line,
                     metadata.target,
                 ))
@@ -115,6 +117,14 @@ class PosixHost:
                     "agents-live", "--repo", root, "run",
                     "--metadata", marker, "--name", target, "--quiet",
                 ]
+            if subscription.utc_offset is not None:
+                # The crontab wakes every hour at the schedule's minute and
+                # dispatch decides at UTC plus the stored offset, so the
+                # cron daemon's own time zone never moves a firing (#609).
+                minute = parse_schedule(subscription.trigger).expression.split()[0]
+                trigger = f"{minute} * * * *"
+                argv += [utc.FLAG, subscription.utc_offset]
+                fingerprint += _utc_suffix(subscription.utc_offset)
             watcher_argv: tuple[str, ...] = ()
         else:
             watch = parse_watch(subscription.trigger)
@@ -165,6 +175,11 @@ def _address(subscription: Subscription) -> tuple[str, str]:
     if not subscription.target.startswith("agent:"):
         raise ValueError(f"POSIX subscription has invalid target: {subscription.target}")
     return subscription.scope.removeprefix("repo:"), subscription.target.removeprefix("agent:")
+
+
+def _utc_suffix(offset: str) -> str:
+    """Fingerprint part that makes an entry without a stored offset re-register."""
+    return f":utc{offset}"
 
 
 def _key(line: str) -> str | None:

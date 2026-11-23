@@ -39,16 +39,18 @@ import sys
 import tempfile
 import xml.etree.ElementTree as ET
 from collections.abc import Sequence
-from datetime import datetime, timedelta, tzinfo
+from datetime import UTC, datetime, timedelta, tzinfo
 from hashlib import sha256
 from math import gcd
 from pathlib import Path, PureWindowsPath
 
 try:
     from ...legacy import triggers
+    from .. import utc
     from . import system as hostruntime
 except ImportError:  # flat execution: sibling scripts import this flat
     from legacy import triggers  # type: ignore[no-redef]
+    from runtime import utc  # type: ignore[no-redef]
     from runtime.hosts import system as hostruntime  # type: ignore[no-redef]
 
 # Every registration this tool makes lives here, so the enumeration a
@@ -432,42 +434,24 @@ def translate(schedule: str) -> list[dict[str, object]]:
         return [{"kind": "boot"}]
     text = triggers._SPECIAL_SCHEDULES.get(text.lower(), text)
     try:
-        minutes, hours, days, months, weekdays = triggers.schedule_fields(text)
+        minutes, hours, _days, _months, _weekdays = triggers.schedule_fields(text)
     except triggers.ScheduleSyntaxError as exc:
         raise ScheduleNotTranslatable(str(exc)) from exc
 
     minute_token, hour_token, dom_token, month_token, dow_token = text.split()
-    dom_restricted = dom_token != "*"
-    dow_restricted = dow_token != "*"
-    month_restricted = month_token != "*"
+    calendar_restricted = (dom_token, month_token, dow_token) != ("*", "*", "*")
 
-    # 1. Determine Calendar Kind and Calendar Exactness
-    if dom_restricted and dow_restricted:
-        cal_kind = "daily"
-        cal_exact = False
-        cal_fallback = (
-            "combined day-of-month and day-of-week restrictions cannot be "
-            "represented in a single calendar trigger; covered with daily trigger and dispatch filtering"
-        )
-    elif dow_restricted and not dom_restricted:
-        cal_kind = "weekly"
-        if month_restricted:
-            cal_exact = False
-            cal_fallback = (
-                "month restriction cannot be combined with weekly trigger; "
-                "covered with weekly trigger and dispatch filtering"
-            )
-        else:
-            cal_exact = True
-            cal_fallback = None
-    elif (dom_restricted or month_restricted) and not dow_restricted:
-        cal_kind = "monthly"
-        cal_exact = True
-        cal_fallback = None
-    else:
-        cal_kind = "daily"
-        cal_exact = True
-        cal_fallback = None
+    # 1. Always a daily trigger. Its boundary is an absolute UTC instant
+    # (see _boundary), and Task Scheduler does not say which zone's calendar
+    # day a weekly or monthly trigger with such a boundary uses, so day,
+    # weekday and month restrictions are left to dispatch, which checks
+    # them at UTC plus the agent's stored offset (#609).
+    cal_kind = "daily"
+    cal_exact = not calendar_restricted
+    cal_fallback = (
+        "day, weekday and month restrictions are checked at dispatch; "
+        "covered with daily trigger"
+    ) if calendar_restricted else None
 
     # 2. Determine Time Pattern, Repetition, Interval, and Duration
     sorted_hours = sorted(hours)
@@ -581,13 +565,6 @@ def translate(schedule: str) -> list[dict[str, object]]:
         "exact": exact,
         "fallback_reason": fallback_reason,
     }
-    if cal_kind == "weekly":
-        trigger["weekdays"] = tuple(sorted(weekdays))
-        trigger["weekday"] = sorted(weekdays)[0]
-    elif cal_kind == "monthly":
-        trigger["days"] = tuple(sorted(days))
-        trigger["day"] = sorted(days)[0]
-        trigger["months"] = tuple(sorted(months))
 
     if interval is not None:
         trigger["interval"] = interval
@@ -608,26 +585,26 @@ def _covering_interval(minutes: set[int]) -> dict[str, object]:
     return {"kind": "interval", "minutes": step, "anchor_minute": anchor % step}
 
 
-def _wall_clock(moment: datetime) -> str:
-    """*moment* as local wall-clock text with no UTC offset.
+def _utc_text(moment: datetime) -> str:
+    """*moment* as an explicit UTC boundary, ending in ``Z``.
 
-    Task Scheduler pins a boundary that carries an offset to that UTC
-    instant forever, while dispatch checks the cron against current local
-    time, so a daylight saving or time zone change turns every firing of
-    an hour-aligned schedule into a silent ``not-due`` skip (#609). A
-    boundary without an offset is evaluated in the computer's current
-    zone, which is the basis the due check uses. *moment* is local time
-    in the zone it carries; only its wall-clock fields are written.
+    Task Scheduler reads a boundary without an offset in whatever zone it
+    currently assumes, which can differ from the zone a process sees and
+    from the zone the agent was registered in, so a daily firing moved by
+    an hour and dispatch skipped it as ``not-due`` (#609). A boundary in
+    UTC names one instant on every computer and in every zone.
     """
-    return moment.replace(tzinfo=None).isoformat(timespec="seconds")
+    return moment.astimezone(UTC).replace(tzinfo=None).isoformat(
+        timespec="seconds") + "Z"
 
 
 def _boundary(trigger: dict[str, object], now: datetime) -> str:
-    """Keep an active calendar period's phase, otherwise choose a future start.
+    """Keep an active daily period's phase, otherwise choose a future start.
 
-    Returned as local wall-clock time (see :func:`_wall_clock`).
+    *now* carries the agent's fixed registration offset, which is the
+    frame the trigger's hours and minutes are in; the result is UTC.
     """
-    return _wall_clock(_boundary_moment(trigger, now))
+    return _utc_text(_boundary_moment(trigger, now))
 
 
 def _boundary_moment(trigger: dict[str, object], now: datetime) -> datetime:
@@ -642,32 +619,11 @@ def _boundary_moment(trigger: dict[str, object], now: datetime) -> datetime:
     if interval and duration and start <= now:
         elapsed = (now - start).total_seconds()
         following = (int(elapsed // (interval * 60)) + 1) * interval
-        weekdays = trigger.get("weekdays") or (trigger.get("weekday"),)
-        days = trigger.get("days") or (trigger.get("day"),)
-        months = trigger.get("months") or tuple(range(1, 13))
-        eligible = (
-            trigger["kind"] == "daily"
-            or trigger["kind"] == "weekly" and (start.weekday() + 1) % 7 in weekdays
-            or trigger["kind"] == "monthly" and start.day in days and start.month in months
-        )
-        if eligible and following < duration:
+        if trigger["kind"] == "daily" and following < duration:
             return start
     if trigger["kind"] == "daily":
         if start <= now:
             start += timedelta(days=1)
-        return start
-    if trigger["kind"] == "weekly":
-        weekdays = set(trigger.get("weekdays") or [int(trigger["weekday"])])
-        while start <= now or ((start.weekday() + 1) % 7) not in weekdays:
-            start += timedelta(days=1)
-        return start
-    if trigger["kind"] == "monthly":
-        days = set(trigger.get("days") or [int(trigger["day"])])
-        months = set(trigger.get("months") or list(range(1, 13)))
-        attempts = 0
-        while (start <= now or start.month not in months or start.day not in days) and attempts < 1461:
-            start += timedelta(days=1)
-            attempts += 1
         return start
     step = int(trigger.get("minutes") or trigger.get("interval_minutes") or 60)
     anchor = int(trigger.get("anchor_minute") or target_minute)
@@ -715,31 +671,6 @@ def _append_trigger(parent: ET.Element, trigger: dict[str, object],
         schedule = _child(element, "ScheduleByDay")
         _child(schedule, "DaysInterval", "1")
         return
-    if trigger["kind"] == "weekly":
-        schedule = _child(element, "ScheduleByWeek")
-        days = _child(schedule, "DaysOfWeek")
-        weekdays = trigger.get("weekdays")
-        if weekdays is None:
-            weekdays = (int(trigger["weekday"]),)
-        for wd in weekdays:
-            _child(days, _WEEKDAY_ELEMENTS[wd])
-        _child(schedule, "WeeksInterval", "1")
-        return
-    if trigger["kind"] == "monthly":
-        schedule = _child(element, "ScheduleByMonth")
-        days_elem = _child(schedule, "DaysOfMonth")
-        days = trigger.get("days")
-        if days is None:
-            days = (int(trigger["day"]),)
-        for d in days:
-            _child(days_elem, "Day", str(d))
-        months_elem = _child(schedule, "Months")
-        months = trigger.get("months")
-        if months is None:
-            months = tuple(range(1, 13))
-        for m in months:
-            _child(months_elem, _MONTH_ELEMENTS[m - 1])
-        return
 
     element = _child(parent, "TimeTrigger")
     _child(element, "StartBoundary", _boundary(trigger, now))
@@ -751,14 +682,17 @@ def _append_trigger(parent: ET.Element, trigger: dict[str, object],
 
 def build_task_xml(*, command: str, arguments: str, working_dir: str,
                    schedules: Sequence[str], description: str, uri: str,
-                   user_id: str, now: datetime | None = None) -> str:
+                   user_id: str, now: datetime | None = None,
+                   utc_offset: str | None = None) -> str:
     """The task definition document for one agent.
 
     Built as a tree rather than a template so a repository path that
     contains an ampersand or a quote is escaped by the XML writer
-    instead of by hand.
+    instead of by hand. *schedules* are read at UTC plus *utc_offset*
+    (the agent's registration offset; UTC when None) and every boundary
+    is written in UTC.
     """
-    now = now or datetime.now().astimezone()
+    now = (now or datetime.now(UTC)).astimezone(_frame_zone(utc_offset))
     ET.register_namespace("", _NS)
     task = ET.Element(f"{{{_NS}}}Task", {"version": _TASK_VERSION})
 
@@ -1057,13 +991,6 @@ def _signature_of(trigger: dict[str, object]) -> tuple:
     rep_interval = trigger.get("interval_minutes")
     rep_duration = trigger.get("duration_minutes")
     rep_part = (int(rep_interval), int(rep_duration or 0)) if rep_interval is not None else ()
-    if kind == "weekly":
-        weekdays = tuple(sorted(trigger.get("weekdays") or [int(trigger["weekday"])]))
-        return ("weekly", weekdays, int(trigger["hour"]), int(trigger["minute"]), *rep_part)
-    if kind == "monthly":
-        days = tuple(sorted(trigger.get("days") or [int(trigger["day"])]))
-        months = tuple(sorted(trigger.get("months") or list(range(1, 13))))
-        return ("monthly", days, months, int(trigger["hour"]), int(trigger["minute"]), *rep_part)
     return ("daily", int(trigger["hour"]), int(trigger["minute"]), *rep_part)
 
 
@@ -1096,17 +1023,28 @@ def _trigger_elements(document: str) -> list[ET.Element] | None:
     return [] if parent is None else list(parent)
 
 
+def _frame_zone(utc_offset: str | None) -> tzinfo:
+    """The fixed zone a schedule is read in: the stored offset, else UTC."""
+    return utc.zone(utc_offset) if utc_offset else UTC
+
+
+def registered_offset(document: str) -> str | None:
+    """The ``--utc-offset`` a registered definition's action passes, or None."""
+    action = _definition_action(document)
+    return utc.offset_in(action[1]) if action else None
+
+
 def _definition_signature(document: str, *,
                           zone: tzinfo | None = None) -> list[tuple]:
     """The same signature, read back out of a registered definition.
 
-    A boundary without an offset is local wall-clock time, which is how
-    Task Scheduler evaluates it, so its fields are read as written (#397).
-    A boundary with an offset is a fixed instant; it is read in *zone*
-    (the current local zone by default), so one pinned before a daylight
-    saving or time zone change reads as firing at a different local time
-    than its schedule asks for (#609).
+    A boundary is read in *zone*, by default the fixed zone of the
+    offset the definition's own action passes to dispatch (UTC when it
+    passes none), which is the frame the schedule was translated in. A
+    boundary without an offset reads its fields as written.
     """
+    if zone is None:
+        zone = _frame_zone(registered_offset(document))
     elements = _trigger_elements(document)
     found: list[tuple] = []
     for element in elements or []:
@@ -1162,17 +1100,19 @@ def _definition_signature(document: str, *,
     return sorted(found)
 
 
-# How a registered clock trigger keeps time: on the local wall clock, or
-# pinned to the UTC instant its boundary named when it was written.
+# How a registered clock trigger keeps time: as UTC instants (the only form
+# this tool writes), on the scheduler's assumed wall clock (written before
+# #609), or pinned to a non-UTC offset.
+UTC_FORM = "utc"
 LOCAL = "local"
 PINNED = "pinned"
 
 
 def boundary_form(document: str) -> str | None:
-    """LOCAL, PINNED, or None for a definition with no clock boundary.
+    """UTC_FORM, LOCAL, PINNED, or None for a definition with no clock boundary.
 
-    One pinned boundary pins the task: that trigger stops following the
-    computer's zone, which is the whole defect (#609).
+    Any boundary not in UTC makes the whole definition that form, so it
+    compares as changed and is registered again (#609).
     """
     form = None
     for element in _trigger_elements(document) or []:
@@ -1183,9 +1123,11 @@ def boundary_form(document: str) -> str | None:
             start = datetime.fromisoformat(boundary.strip())
         except ValueError:
             return PINNED
-        if start.tzinfo is not None:
+        if start.tzinfo is None:
+            return LOCAL
+        if start.utcoffset() != timedelta(0):
             return PINNED
-        form = LOCAL
+        form = UTC_FORM
     return form
 
 
@@ -1203,7 +1145,7 @@ def desired_trigger_identity(schedules: Sequence[str]) -> str | None:
     signature = trigger_signature(schedules)
     if all(entry == ("logon",) for entry in signature):
         return None
-    return _trigger_identity(LOCAL, signature)
+    return _trigger_identity(UTC_FORM, signature)
 
 
 def registered_trigger_identity(document: str, *,
@@ -1224,9 +1166,13 @@ def registered_trigger_identity(document: str, *,
 def trigger_drift(document: str, schedules: Sequence[str], *,
                   zone: tzinfo | None = None) -> str | None:
     """Why a registered definition will not fire as *schedules* ask, or None."""
-    if boundary_form(document) == PINNED:
-        return ("start boundary is pinned to a UTC offset, so it will not "
-                "follow daylight saving or time zone changes")
+    form = boundary_form(document)
+    if form == LOCAL:
+        return ("start boundary has no UTC offset, so Task Scheduler reads it "
+                "in whatever time zone it assumes")
+    if form == PINNED:
+        return ("start boundary is pinned to a non-UTC offset; this version "
+                "writes UTC boundaries")
     registered = _definition_signature(document, zone=zone)
     desired = trigger_signature(schedules)
     if registered != desired:
@@ -1270,19 +1216,7 @@ def simulate_firings(
     day = start.replace(hour=0, minute=0, second=0, microsecond=0)
     end_day = end.replace(hour=0, minute=0, second=0, microsecond=0)
     while day <= end_day:
-        active = False
-        kind = trigger["kind"]
-        if kind == "daily":
-            active = True
-        elif kind == "weekly":
-            weekdays = set(trigger.get("weekdays") or [trigger.get("weekday")])
-            active = ((day.weekday() + 1) % 7) in weekdays
-        elif kind == "monthly":
-            days = set(trigger.get("days") or [trigger.get("day")])
-            months = set(trigger.get("months") or list(range(1, 13)))
-            active = (day.day in days) and (day.month in months)
-
-        if active:
+        if trigger["kind"] == "daily":
             fire_time = day.replace(
                 hour=int(trigger["hour"]), minute=int(trigger["minute"]),
                 tzinfo=start.tzinfo,
@@ -1303,12 +1237,19 @@ def simulate_firings(
 
 
 def diagnostics(schedule: str, now: datetime | None = None, *,
-                registered: str | None = None) -> dict[str, object]:
+                registered: str | None = None,
+                utc_offset: str | None = None) -> dict[str, object]:
     """Expose translation details for a cron expression on Windows.
+
+    The schedule is read at UTC plus *utc_offset*, taken from *registered*
+    when not given, otherwise the current local offset that registering
+    now would capture.
 
     Reports:
     - canonical: the normalized cron expression
-    - native_trigger: kind, interval, duration, and boundary (local wall clock)
+    - utc_offset: the fixed offset the schedule is read at
+    - native_trigger: kind, interval, duration, boundary (UTC) and
+      boundary_local (local time with a short zone name, for display)
     - exact: whether native firings match cron without extra wake-ups;
       false whenever *registered* does not fire as the schedule asks
     - fallback_reason: why covering was chosen if not exact
@@ -1319,7 +1260,11 @@ def diagnostics(schedule: str, now: datetime | None = None, *,
     - registered_trigger: only with *registered*, the task definition Task
       Scheduler holds: its boundaries, whether it matches, and why not
     """
-    now = now or datetime.now().astimezone()
+    if utc_offset is None and registered is not None:
+        utc_offset = registered_offset(registered)
+    # Not yet registered: show what registering now would capture.
+    zone = _frame_zone(utc_offset or utc.current_offset())
+    now = (now or datetime.now(UTC)).astimezone(zone)
     text = schedule.strip()
     canonical = triggers._SPECIAL_SCHEDULES.get(text.lower(), text)
     triggers_list = translate(schedule)
@@ -1341,23 +1286,25 @@ def diagnostics(schedule: str, now: datetime | None = None, *,
             "summary": "exact logon trigger",
         }
 
-    boundary_str = _boundary(trig, now)
+    boundary_moment = _boundary_moment(trig, now)
+    boundary_str = _utc_text(boundary_moment)
     exact = bool(trig.get("exact", True))
     fallback_reason = trig.get("fallback_reason")
 
     kind = trig["kind"]
-    if kind == "weekly":
-        period_name = "week"
-        ref_start = datetime(2026, 9, 7, 0, 0, tzinfo=now.tzinfo)
-        ref_end = ref_start + timedelta(days=7) - timedelta(seconds=1)
-    elif kind == "monthly":
+    _minute, _hour, dom_token, month_token, dow_token = canonical.split()
+    if dom_token != "*" or month_token != "*":
         period_name = "year"
-        ref_start = datetime(2026, 1, 1, 0, 0, tzinfo=now.tzinfo)
-        ref_end = datetime(2026, 12, 31, 23, 59, 59, tzinfo=now.tzinfo)
+        ref_start = datetime(2026, 1, 1, 0, 0, tzinfo=zone)
+        ref_end = datetime(2026, 12, 31, 23, 59, 59, tzinfo=zone)
+    elif dow_token != "*":
+        period_name = "week"
+        ref_start = datetime(2026, 9, 7, 0, 0, tzinfo=zone)
+        ref_end = ref_start + timedelta(days=7) - timedelta(seconds=1)
     else:
         period_name = "day"
-        ref_start = datetime(2026, 9, 8, 0, 0, tzinfo=now.tzinfo)
-        ref_end = datetime(2026, 9, 8, 23, 59, 59, tzinfo=now.tzinfo)
+        ref_start = datetime(2026, 9, 8, 0, 0, tzinfo=zone)
+        ref_end = datetime(2026, 9, 8, 23, 59, 59, tzinfo=zone)
 
     due_list, native_list = simulate_firings(trig, canonical, ref_start, ref_end)
     native_count = len(native_list)
@@ -1374,11 +1321,13 @@ def diagnostics(schedule: str, now: datetime | None = None, *,
 
     result: dict[str, object] = {
         "canonical": canonical,
+        "utc_offset": utc.format_offset(now.utcoffset() or timedelta()),
         "native_trigger": {
             "kind": kind,
             "interval": trig.get("interval"),
             "duration": trig.get("duration"),
             "boundary": boundary_str,
+            "boundary_local": utc.display(boundary_moment),
         },
         "exact": exact,
         "fallback_reason": fallback_reason,

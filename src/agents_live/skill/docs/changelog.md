@@ -1,7 +1,7 @@
 ---
 title: Changelog
 description: Reverse-chronological log of significant Agents Live changes
-ms.date: 2026-10-29
+ms.date: 2026-11-23
 ms.topic: reference
 ---
 
@@ -24,18 +24,28 @@ history is retained in the source repository.
   opens under the Filters button. The packaged dashboard readiness gate now
   waits for the repository selector to refresh after an unregister instead of
   sampling it once, which intermittently failed on every NiceGUI version.
-- fix: keep Windows schedules on local time across daylight-saving and time zone changes. ([#609](https://github.com/johnshew/agents-live/issues/609))
-  Task Scheduler triggers were registered with a start boundary pinned to the
-  UTC offset in effect at registration. After a daylight-saving change every
-  hour-aligned firing arrived an hour off and was skipped as not due. Triggers
-  now register local wall-clock time, which Task Scheduler follows through
-  offset changes, and read-back treats a boundary without an offset as local
-  time, never UTC. Automatic maintenance compares the registered trigger with
-  the computed one and re-registers an offset-pinned or drifted trigger once,
-  so existing hosts recover after upgrade; each install is read back and
-  verified. `doctor` fails a registered clock trigger that differs from the
-  computed one, and `status` schedule diagnostics no longer report an exact
-  match when the registered trigger differs.
+- fix: run clock schedules in UTC so the scheduler's time zone can no longer skip a due run. ([#609](https://github.com/johnshew/agents-live/issues/609))
+  Task Scheduler read an offset-less start boundary in a time zone it had
+  assumed earlier, so after a daylight saving or time zone change every firing
+  arrived off its slot and dispatch skipped it as `not-due`. Local time is now
+  read once, when an agent's wake entry is registered: the UTC offset in effect
+  then is stored on the entry as `--utc-offset`, and from then on the schedule
+  is a fixed UTC time. Daylight saving changes and zone switches do not move
+  it; stop and start the agent to re-anchor it, and a lost or rebuilt entry
+  takes the current offset. Task Scheduler start boundaries are written in UTC
+  with an explicit `Z`, and the crontab line keeps only the schedule's minute
+  and wakes hourly (for example `12 3 * * *` becomes `12 * * * *`). Each wake
+  is due only when the schedule matches UTC plus the stored offset; other
+  wakes end quietly as `not-due`. Schedules restricted by day, weekday or
+  month now wake daily on Windows and are filtered at dispatch, because Task
+  Scheduler's weekly and monthly triggers choose days in its own zone. Existing
+  entries without a stored offset compare as changed and are registered again
+  once by automatic maintenance. `doctor` fails a registered trigger whose
+  boundary is not in UTC, schedule diagnostics show the stored offset with the
+  UTC boundary and its local time, and clock-fire queries follow each agent's
+  stored offset. A crontab host whose cron daemon switches between a whole-hour
+  and a half-hour offset after registration can miss wakes until the agent is
+  restarted.
 - docs: state in `--help` that `logs --sql` queries the `log` view and cannot be combined with filter flags such as `--since`, and that `status --json` reports the resolved runtime version, channel and commit.
   The generated command reference also now lists the `versions` command and
   the `run --timeout`, `run --no-retry`, `transcript --attempt`,
