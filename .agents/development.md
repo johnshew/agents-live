@@ -207,6 +207,12 @@ or app child sessions. They add no commit, merge, release or runtime authority.
   you can, and tell the developer to start a fresh coordinator session. The new
   session resumes from the prior session's record (its handoff, open PRs,
   worktrees and the check's state), not from a rebuilt plan.
+- **When blocked, ask and keep moving.** A coordinator or worker that is
+  blocked does two things at once. It posts an ASK on the cross-team
+  coordination issue, naming its role and asking the other coordinators for
+  unblocking strategies, with no private content. Meanwhile it switches to
+  other authorized, unblocked work so progress continues. It never sits idle
+  waiting for an answer.
 - **Run the heartbeat as its own worker.** Use a same-session automation where
   the harness offers one. Otherwise start a `Heartbeat` child session whose
   only job is to run `uv run --script tools/coordinator-check.py` every 15 to
@@ -555,12 +561,12 @@ Fold into Commit hygiene at the next consolidation of this document.
 
 <!-- glp-update:v1 id=d121e4f7-57ac-40d1-bfc7-deb5e459d511 -->
 <a id="glp-d121e4f7-57ac-40d1-bfc7-deb5e459d511"></a>
-### GLP Update: Windowless launcher for long commands and fresh sessions for hung coordinators
+### GLP Update: Windowless launcher, fresh sessions for hung coordinators and progress when blocked
 
 - Update-ID: d121e4f7-57ac-40d1-bfc7-deb5e459d511
 - Recorded-UTC: 2026-11-23T19:53:51Z
 - Kind: addition
-- Topics: orchestration, detached processes, hidden windows, coordinator recovery
+- Topics: orchestration, detached processes, hidden windows, coordinator recovery, blocked work
 - Workstream: worker-launch practices adoption
 - Target: .agents/development.md, Orchestrating delegates and child sessions; new tools/run-hidden.py; compared origin/main 43e70b5
 - Source-Session: Copilot app worker session 2026-11-23 (harness history)
@@ -574,7 +580,9 @@ starts a command with no visible window on Windows, optionally detached with a
 printed process ID and a log file, and relays output and exit code otherwise.
 When every tool call in a coordinator session hangs, the coordinator stops
 retrying and the developer starts a fresh coordinator session that resumes
-from the prior session's record.
+from the prior session's record. A coordinator or worker that is blocked asks
+the other coordinators for unblocking strategies on the cross-team coordination
+issue and meanwhile switches to other authorized, unblocked work.
 
 #### Evidence
 - User direction, 2026-11-23: the developer chose to adopt these two
@@ -585,17 +593,23 @@ from the prior session's record.
 - Observation, 2026-11-23: a coordinator session's tool calls, including
   session creation and trivial searches, hung for hours. A fresh coordinator
   session started both pending workers on the first try.
+- User direction, 2026-11-23, added to the same change: "if you gets blocked
+  you can talk to the other about good strategies to get unblocked and if you
+  do get blocked work on other works so you keep making progress".
 
 #### Previous Knowledge
 The guide pointed long no-reasoning commands at the agent shell's async
 detached mode, which does not control console windows for the command's own
 children, and had no rule for a coordinator session whose tool calls all hang.
+The "Never stall a child" rule covered a supervisor answering its children, but
+not what a blocked coordinator or worker does with its own time.
 
 #### Verification and Limits
 Focused behavior tests cover output and exit-code relay, log appending,
 detached start with a printed process ID, usage and start errors, and the
 Windows creation flags. The hung-session rule rests on one observation; the
-cause of the hang was not diagnosed.
+cause of the hang was not diagnosed. The blocked-work rule is developer
+direction and has not yet been exercised here.
 
 #### Follow-up
 Fold into the orchestration guidance at the next consolidation of this document.
