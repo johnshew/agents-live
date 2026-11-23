@@ -13743,8 +13743,10 @@ class TestSteeringHook(unittest.TestCase):
         return {"type": "user.message", "data": {"content": content}}
 
     @staticmethod
-    def reply(content: str) -> dict:
-        return {"type": "assistant.message", "data": {"content": content}}
+    def reply(content: str, tools: int = 0) -> dict:
+        requests = [{"toolCallId": f"call-{n}", "name": "view"} for n in range(tools)]
+        return {"type": "assistant.message",
+                "data": {"content": content, "toolRequests": requests}}
 
     def test_transform_appends_reminder_once(self) -> None:
         transform = self.hook["transform"]
@@ -13755,28 +13757,29 @@ class TestSteeringHook(unittest.TestCase):
         self.assertEqual(transform({"transformedPrompt": modified}), {})
         self.assertEqual(transform({"transformedPrompt": "  "}), {})
 
-    def test_stop_blocks_first_reply_without_steering_line(self) -> None:
+    def test_stop_blocks_steering_line_hidden_before_last_tool_call(self) -> None:
         path = self.transcript(
             self.user("earlier"), self.reply("Steering: earlier; done."),
-            self.user("file two issues"), self.reply(""),
-            self.reply("I'll file both issues first."),
-            self.reply("Steering: a middle progress note does not count."),
+            self.user("file two issues"),
+            self.reply("Steering: new request; new goals: two issues; still "
+                       "open: none; continue until: filed.", tools=1),
+            self.reply("Filing the second issue.", tools=2),
             self.reply("Both issues are filed."))
         output = self.hook["stop"]({"transcriptPath": path})
         self.assertEqual(output["decision"], "block")
         self.assertIn("Steering:", output["reason"])
 
-    def test_stop_allows_final_reply_that_begins_with_steering_line(self) -> None:
+    def test_stop_allows_tool_turn_whose_final_message_has_steering_line(self) -> None:
         path = self.transcript(
-            self.user("1a"), self.reply(""),
-            self.reply("Next I'll read the worker back."),
+            self.user("1a"), self.reply("", tools=1),
+            self.reply("Next I'll read the worker back.", tools=1),
             self.reply("Steering: decision; new goals: none; still open: none; "
                        "continue until: merged.\n\nDone."))
         self.assertEqual(self.hook["stop"]({"transcriptPath": path}), {})
 
-    def test_stop_allows_reply_that_begins_with_steering_line(self) -> None:
+    def test_stop_allows_tool_free_reply_with_steering_line(self) -> None:
         path = self.transcript(
-            self.user("status"), self.reply(""),
+            self.user("status"),
             self.reply("\n**Steering:** question; new goals: none; still open: "
                        "none; continue until: answered.\n\nAll green."))
         self.assertEqual(self.hook["stop"]({"transcriptPath": path}), {})

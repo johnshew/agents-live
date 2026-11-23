@@ -22,11 +22,16 @@ not optional reference links or background automation.
 
 Assess every steering input before acting: acknowledge its classification, new
 goals (or none), current goals, continuation conditions and workstream states.
-Begin the first reply to every user message, in every harness, with one line:
+Begin the final message of every reply to a user message, in every harness,
+with one line:
 `Steering: <classification>; new goals: <list or none>; still open: <list or
-none>; continue until: <condition>.` Repository hooks enforce this:
+none>; continue until: <condition>.` The final message is the text after the
+last tool call, or the only message in a tool-free reply. Put the answers in
+that same final message: earlier text collapses with the tool calls and is
+hidden from the developer. Repository hooks enforce this:
 [.github/hooks/steering.json](.github/hooks/steering.json) appends a reminder
-to each prompt and forces one correction turn when the line is missing, and
+to each prompt and forces one correction turn when the final message lacks the
+line, and
 [.claude/settings.json](.claude/settings.json) adds the reminder for Claude
 Code. Both run [tools/steering-hook.py](tools/steering-hook.py) and load only in
 a trusted checkout.
@@ -76,8 +81,8 @@ prevail; CDL/GLP add no write, integration, release or deployment authority.
   and code names unless requested or needed for a technical handoff.
 - **Harness-aware bookkeeping:** in the GitHub Copilot app or Copilot CLI, the
   harness already records session history, so do not create a local `logs/cdl/`
-  session log or print the per-update single-line checklist. Still begin each
-  reply to a user message with the steering line and provide the
+  session log or print the per-update single-line checklist. Still begin the
+  final message of each reply to a user message with the steering line and provide the
   answer-first final accounting of every goal and workstream, outstanding checks,
   learning, publication and open decisions before stopping; include evidence in
   delegate handoffs; and run the GLP learning pass with independent readback. Other
@@ -694,3 +699,53 @@ worker that only reads files for 20 minutes is also reported as stalled.
 #### Follow-up
 Fold into the orchestration guidance at the next consolidation of this document.
 <!-- /glp-update:v1 id=0d5cac9f-a8f8-4213-98a4-1e4422c0ed36 -->
+
+<!-- glp-update:v1 id=5badf487-d360-4b44-9430-8cf02e4b1147 -->
+<a id="glp-5badf487-d360-4b44-9430-8cf02e4b1147"></a>
+### GLP Update: The steering line and the answers go in the final message
+
+- Update-ID: 5badf487-d360-4b44-9430-8cf02e4b1147
+- Recorded-UTC: 2026-11-23T19:43:36Z
+- Kind: correction
+- Topics: steering classification, hooks, final message, tool-call collapse
+- Workstream: steering stop-hook false alarms
+- Target: AGENTS.md, Continuous Development and Learning and Local Policy; tools/steering-hook.py; compared origin/main 43e70b5
+- Source-Session: Copilot app worker session 2026-11-23 (harness history)
+- Evidence-Basis: mixed
+- Application: applied
+- Consolidation: pending
+
+#### Change
+A reply satisfies the steering protocol when its final assistant message, the
+text after the last tool call or the only message in a tool-free reply, begins
+with the `Steering:` line, and that same message carries the answers. The stop
+hook judges only that final message, and its reminder and correction text say
+so. It keeps the one-correction-per-turn limit and fails open when there is no
+final text to judge. This corrects update 92849b4c, which judged the first
+reply text.
+
+#### Evidence
+- User direction, 2026-11-23: "make sure your final response to me includes
+  the answers because otherwise it gets hidden in the processing collapse".
+- Observation, 2026-11-23: in recent Copilot app transcripts, every forced
+  correction followed a tool-using reply whose first message was recorded with
+  empty text and whose final message lacked the line. Text before the last tool
+  call is collapsed in the app, so a line placed there was invisible, and the
+  previous first-or-last check could not tell which message the developer saw.
+
+#### Previous Knowledge
+Update 92849b4c required the line at the start of the first reply and had the
+hook check the first reply text. A later change also accepted the final reply,
+leaving the rule ambiguous about which message counts.
+
+#### Verification and Limits
+Behavior tests cover a tool-using reply with the line only before the last tool
+call (blocked), a tool-using reply whose final message has the line (allowed),
+a tool-free reply (allowed), and the fail-open and one-correction paths. The
+hook runs only where the CLI trusts the checkout; Claude Code receives the
+reminder without the stop backstop.
+
+#### Follow-up
+Fold this and update 92849b4c into the steering guidance at the next
+consolidation of this document.
+<!-- /glp-update:v1 id=5badf487-d360-4b44-9430-8cf02e4b1147 -->
