@@ -194,9 +194,19 @@ or app child sessions. They add no commit, merge, release or runtime authority.
   6. Keep slices under about 45 minutes; when one merges, start the next in a
      fresh session from current `origin/main` rather than reusing the old one.
   A long command with no reasoning needed (a build or gate run) can instead
-  run as a detached hidden process (the agent shell's async detached mode),
-  writing its result to a gitignored file. Use in-session task subagents only
-  for short, bounded checks whose verdict is all that matters.
+  run as a detached hidden process through
+  `uv run --script tools/run-hidden.py --detach --log <file> -- <command>`,
+  with the log in a gitignored location. It prints the process ID and returns
+  at once; on Windows neither the command nor anything it starts opens a
+  window. Without `--detach` it waits and relays the output and exit code.
+  Use in-session task subagents only for short, bounded checks whose verdict
+  is all that matters.
+- **Restart a hung coordinator; do not retry it.** If every tool call in a
+  coordinator session hangs, including trivial reads, searches and session
+  creation, the session itself is the fault. Stop retrying, record the state
+  you can, and tell the developer to start a fresh coordinator session. The new
+  session resumes from the prior session's record (its handoff, open PRs,
+  worktrees and the check's state), not from a rebuilt plan.
 - **Run the heartbeat as its own worker.** Use a same-session automation where
   the harness offers one. Otherwise start a `Heartbeat` child session whose
   only job is to run `uv run --script tools/coordinator-check.py` every 15 to
@@ -542,3 +552,51 @@ differently.
 #### Follow-up
 Fold into Commit hygiene at the next consolidation of this document.
 <!-- /glp-update:v1 id=7a98e19a-07e1-45d3-b1e8-4d92ae0f54c0 -->
+
+<!-- glp-update:v1 id=d121e4f7-57ac-40d1-bfc7-deb5e459d511 -->
+<a id="glp-d121e4f7-57ac-40d1-bfc7-deb5e459d511"></a>
+### GLP Update: Windowless launcher for long commands and fresh sessions for hung coordinators
+
+- Update-ID: d121e4f7-57ac-40d1-bfc7-deb5e459d511
+- Recorded-UTC: 2026-11-23T19:53:51Z
+- Kind: addition
+- Topics: orchestration, detached processes, hidden windows, coordinator recovery
+- Workstream: worker-launch practices adoption
+- Target: .agents/development.md, Orchestrating delegates and child sessions; new tools/run-hidden.py; compared origin/main 43e70b5
+- Source-Session: Copilot app worker session 2026-11-23 (harness history)
+- Evidence-Basis: mixed
+- Application: applied
+- Consolidation: pending
+
+#### Change
+Long commands that need no reasoning run through `tools/run-hidden.py`, which
+starts a command with no visible window on Windows, optionally detached with a
+printed process ID and a log file, and relays output and exit code otherwise.
+When every tool call in a coordinator session hangs, the coordinator stops
+retrying and the developer starts a fresh coordinator session that resumes
+from the prior session's record.
+
+#### Evidence
+- User direction, 2026-11-23: the developer chose to adopt these two
+  worker-launch practices from another repository the developer maintains.
+  Only the launcher's process-creation behavior and the recovery rule were
+  adopted; that repository's process registry and other specific content were
+  not copied.
+- Observation, 2026-11-23: a coordinator session's tool calls, including
+  session creation and trivial searches, hung for hours. A fresh coordinator
+  session started both pending workers on the first try.
+
+#### Previous Knowledge
+The guide pointed long no-reasoning commands at the agent shell's async
+detached mode, which does not control console windows for the command's own
+children, and had no rule for a coordinator session whose tool calls all hang.
+
+#### Verification and Limits
+Focused behavior tests cover output and exit-code relay, log appending,
+detached start with a printed process ID, usage and start errors, and the
+Windows creation flags. The hung-session rule rests on one observation; the
+cause of the hang was not diagnosed.
+
+#### Follow-up
+Fold into the orchestration guidance at the next consolidation of this document.
+<!-- /glp-update:v1 id=d121e4f7-57ac-40d1-bfc7-deb5e459d511 -->
