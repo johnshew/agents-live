@@ -534,9 +534,7 @@ class TestOwnershipEnforcement(TempRepository):
             schedules=["0 */12 * * *"], description="fixture", uri="fixture",
             user_id="user",
             now=datetime(2026, 10, 29, 10, tzinfo=timezone(timedelta(hours=-4))))
-        stale = current.replace(
-            "<StartBoundary>2026-10-29T12:00:00</StartBoundary>",
-            "<StartBoundary>2026-10-29T12:00:00-04:00</StartBoundary>")
+        stale = current.replace("2026-10-29T10:00:00-04:00", "2026-10-29T10:00:00-05:00")
         self.assertNotEqual(current, stale)
         for document, healthy in ((stale, False), (current, True)):
             with self.subTest(healthy=healthy):
@@ -550,18 +548,20 @@ class TestOwnershipEnforcement(TempRepository):
                     mock.patch.object(doctor, "_git_index_check", return_value=None),
                     mock.patch.object(doctor, "_health_payload", return_value=None),
                     mock.patch.object(doctor.update_check, "interactive", return_value=False),
+                    mock.patch.object(task_scheduler, "_local_now", return_value=datetime(
+                        2026, 10, 29, 10, tzinfo=timezone(timedelta(hours=-4)))),
                     contextlib.redirect_stdout(output),
                 ):
                     code = doctor.main([])
                 text = output.getvalue()
                 if healthy:
                     self.assertEqual(0, code, text)
-                    self.assertIn("ok: schedule triggers: 1 registered on local time", text)
+                    self.assertIn("ok: schedule triggers: 1 registered for the current local UTC offset", text)
                 else:
                     self.assertEqual(1, code, text)
                     self.assertIn(
                         f"ERROR: schedule trigger {spec.identifier}: 0 */12 * * *: "
-                        "start boundary is pinned to a UTC offset", text)
+                        "host UTC offset changed since registration", text)
 
 
 class TestCrontabTriggerStore(TempRepository):

@@ -335,9 +335,8 @@ def _trigger_fingerprint(action: str, trigger: str | None) -> str:
     """An action fingerprint extended by how its clock trigger keeps time.
 
     The subscription key already changes with the schedule text, but not
-    with how a registered task holds it: a boundary pinned to a UTC offset
-    drifts an hour at every daylight saving change while the action and
-    key stay equal (#609). Folding the read-back trigger in makes such a
+    with how a registered task holds it. Its UTC anchor and registration
+    offset must follow the host's current local clock. Folding both in makes such a
     task compare as changed, so convergence re-registers it once. A task
     with no clock boundary (a logon trigger) keeps its action fingerprint,
     which a watcher process also carries.

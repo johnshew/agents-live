@@ -1336,6 +1336,17 @@ def main() -> int:
         environment = _environment(directory)
         launcher, python = _launcher(directory, args.editable, args.wheel)
         total_started = time.perf_counter()
+        if sys.platform == "win32":
+            clock = subprocess.run(
+                [*python, "-m", "agents_live.runtime.hosts.clock_readiness"],
+                cwd=directory, env=environment, capture_output=True,
+                text=True, encoding="utf-8",
+            )
+            if clock.returncode:
+                raise ReadinessError(
+                    "packaged native clock did not launch: "
+                    + (clock.stderr.strip() or clock.stdout.strip()))
+            _say(clock.stdout.strip())
         for run in plan["runs"]:
             _seed_started_state(python, directory, environment)
             _check(
