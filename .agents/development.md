@@ -180,8 +180,12 @@ or app child sessions. They add no commit, merge, release or runtime authority.
      acceptance check, quoting the developer's request; the exact worktree,
      branch and owned paths; the paths and runtime it must not touch; its
      authority (for example commit and push its branch, open a PR, but no
-     merge); the ban on checkout, reset, restore, stash and `ask_user`; and the
-     expected return: changed paths, check results, blockers and next action.
+     merge); the ban on checkout, reset, restore and stash; and the expected
+     return: changed paths, check results, blockers and next action. Every
+     brief also says, in its own words, never to use `ask_user` or any question
+     form and to send decisions to the coordinator with `send_message` while
+     continuing other work: a pending form blocks the worker and also blocks
+     the coordinator's steering messages from reaching it.
      Put longer standing detail in a gitignored file the prompt points to.
   3. Read the session back to confirm its model and working directory; a
      session that failed startup is recreated, not revived by message.
@@ -223,8 +227,10 @@ or app child sessions. They add no commit, merge, release or runtime authority.
   clock, and treats a comment as new when either its created or its updated
   time is past that mark. It excludes only its own coordinator's posts, and it
   flags a coordinator posting for the first time and any ask addressed to all
-  coordinators. It never acts and never posts to the issue; to change what it
-  checks, change the script.
+  coordinators. It also flags any child chat in the input-needed state, and any
+  idle child chat that has not reported an outcome, blocker or decision. It
+  never acts and never posts to the issue; to change what it checks, change the
+  script.
   Retire it when the goals are met.
 - **Name the workspace in every brief.** State the exact worktree and tested
   head the delegate may read, edit or test, and the excluded locations (for
@@ -235,6 +241,13 @@ or app child sessions. They add no commit, merge, release or runtime authority.
   approvals. Answer them within the developer's goals and recorded authority,
   give a next action, and escalate to the developer only a genuinely new
   authority or scope decision, framed with options and a recommendation.
+- **Replace a child stuck on a form.** A child waiting on a question form
+  cannot receive steering. Do not wait for it. First preserve its handoff,
+  local edits, unpushed commits and any scratch a successor needs. Then stop
+  its turn (archiving the chat is fine) and start a replacement whose brief
+  embeds the decision and points to the preserved work. Keep the stuck child's
+  worktree and branch until the close-out conditions below are met; being
+  stuck never justifies tearing down a dirty or work-owning child.
 - **Children report only on outcomes.** Brief each child to message its
   supervisor only at a merge-ready result, a blocker or a decision it cannot
   make, never through a blocking dialog, and to state its next action whenever
@@ -634,3 +647,50 @@ direction and has not yet been exercised here.
 #### Follow-up
 Fold into the orchestration guidance at the next consolidation of this document.
 <!-- /glp-update:v1 id=d121e4f7-57ac-40d1-bfc7-deb5e459d511 -->
+
+<!-- glp-update:v1 id=ec973a90-89d2-4005-949e-a3b106576e96 -->
+<a id="glp-ec973a90-89d2-4005-949e-a3b106576e96"></a>
+### GLP Update: No question forms in worker briefs, heartbeat flags waiting children, replace stuck children
+
+- Update-ID: ec973a90-89d2-4005-949e-a3b106576e96
+- Recorded-UTC: 2026-11-24T09:56:09Z
+- Kind: addition
+- Topics: orchestration, worker briefs, ask_user, heartbeat, child sessions
+- Workstream: developer-away guidance
+- Target: .agents/development.md, Orchestrating delegates and child sessions; compared origin/main 6a9a261
+- Source-Session: Copilot app worker session 2026-11-24 (harness history)
+- Evidence-Basis: mixed
+- Application: applied
+- Consolidation: pending
+
+#### Change
+Every worker brief states that the worker never uses `ask_user` or any
+question form and sends decisions to the coordinator with `send_message`. The
+heartbeat flags child chats in the input-needed state and idle child chats that
+have not reported. A coordinator replaces a child stuck on a form instead of
+waiting: it preserves the child's handoff, local edits, unpushed commits and
+needed scratch, stops its turn, and starts a fresh child whose brief embeds the
+decision. The stuck child's worktree and branch stay until the existing
+close-out conditions are met.
+
+#### Evidence
+- Observation, 2026-11-24: a release worker opened an `ask_user` form and
+  stalled for about two hours; the coordinator's steering message could not
+  reach it while the form was pending.
+- User direction, 2026-11-24: the developer chose to fold these three
+  coordinator lessons into this guide in the same change as the developer-away
+  guidance.
+
+#### Previous Knowledge
+The brief template already listed `ask_user` among banned actions, without the
+reason or the `send_message` alternative. The heartbeat read the check and the
+coordination issue but not child chat state, and "Never stall a child" assumed
+the supervisor could always answer a waiting child.
+
+#### Verification and Limits
+Documentation only. The heartbeat flags depend on the harness exposing child
+chat state; the check script does not read it.
+
+#### Follow-up
+Fold into the orchestration guidance at the next consolidation of this document.
+<!-- /glp-update:v1 id=ec973a90-89d2-4005-949e-a3b106576e96 -->
