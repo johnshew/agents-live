@@ -10,7 +10,6 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 from .. import paths
-from ..runtime import utc
 from ..runtime.grammars import parse_schedule
 from .events import create, record
 from .timing import current as current_identity
@@ -28,25 +27,9 @@ def timezone_signature() -> str:
     return "host-local:" + hashlib.sha256(material.encode()).hexdigest()[:24]
 
 
-def audit_zone(zone):
-    """The zone expected slots are enumerated in, False when unauditable.
-
-    ``utc+HH:MM`` is an agent's fixed registration offset (#609) and is
-    always auditable; the older host-local signature is auditable only
-    while this host's zone rules are unchanged (None means local time).
-    """
-    if isinstance(zone, str) and zone.startswith("utc"):
-        try:
-            return utc.zone(zone.removeprefix("utc"))
-        except ValueError:
-            return False
-    return None if zone == timezone_signature() else False
-
-
 def observe(subscriptions, *, protected_scopes=(), protected_targets=(),
-            complete: bool = True, utc_offsets=()) -> None:
+            complete: bool = True) -> None:
     """Caller holds the launch gate and has committed complete desired intent."""
-    offsets = dict(utc_offsets)
     location = paths.state_home() / "clock-expectations.json"
     try:
         previous = json.loads(location.read_text(encoding="utf-8"))
@@ -55,7 +38,6 @@ def observe(subscriptions, *, protected_scopes=(), protected_targets=(),
     except (OSError, ValueError):
         previous = {}
     desired: dict[str, dict[str, list[str]]] = {}
-    zones: dict[tuple[str, str], str] = {}
     for item in subscriptions:
         if (item.kind != "schedule" or not item.scope.startswith("repo:")
                 or item.trigger == "@reboot"):
@@ -63,8 +45,6 @@ def observe(subscriptions, *, protected_scopes=(), protected_targets=(),
         repository = item.scope.removeprefix("repo:")
         identifier = item.target.removeprefix("agent:")
         desired.setdefault(repository, {}).setdefault(identifier, []).append(item.trigger)
-        if item.key in offsets:
-            zones.setdefault((repository, identifier), "utc" + offsets[item.key])
     for repository, agents in previous.items():
         if not isinstance(agents, dict):
             continue
@@ -83,8 +63,7 @@ def observe(subscriptions, *, protected_scopes=(), protected_targets=(),
                 "clock-schedule", "observed", repository=repository,
                 agent=identifier, run_id=current_identity("convergence").run_id, origin="clock",
                 attributes=(("schedules", schedules if complete else None),
-                            ("schedule_timezone", zones.get(
-                                (repository, identifier), timezone_signature()))),
+                            ("schedule_timezone", timezone_signature())),
             )
             record(paths.host_logs_dir() / "clock-schedules.jsonl",
                    replace(event, timestamp=now().isoformat()))
@@ -96,36 +75,32 @@ def expected(snapshots, *, until: datetime | None = None,
              local_timezone=None):
     """Yield expected UTC slots only within retained, explicitly observed intent.
 
-    An agent registered with a fixed UTC offset is enumerated at that offset;
-    an older observation uses this host's local timezone (*local_timezone*).
-    Candidate enumeration in UTC preserves skipped/repeated DST minutes
-    without scanning every minute.
+    The native scheduler uses this host's local timezone. Candidate enumeration
+    in UTC preserves skipped/repeated DST minutes without scanning every minute.
     """
     boundary = (until or now()).astimezone(timezone.utc) - timedelta(seconds=MISFIRE_GRACE_S)
     if before is not None:
         boundary = min(boundary, before)
     grouped = {}
     for timestamp, repository, identifier, schedules, version, generation, zone in snapshots:
-        frame = audit_zone(zone)
         try:
             if isinstance(timestamp, str):
                 timestamp = datetime.fromisoformat(timestamp)
             expressions = json.loads(schedules) if isinstance(schedules, str) else schedules
             parsed = tuple(parse_schedule(item) for item in expressions)
-            if frame is False:
+            if zone != timezone_signature():
                 parsed = ()
         except (ValueError, TypeError):
             parsed = ()
         grouped.setdefault((repository, identifier), []).append(
-            (timestamp, parsed, version, generation,
-             local_timezone if frame is None or frame is False else frame))
+            (timestamp, parsed, version, generation))
     for (repository, identifier), observations in grouped.items():
         observations.sort(key=lambda row: row[0])
-        for index, (timestamp, schedules, version, generation, frame) in enumerate(observations):
+        for index, (timestamp, schedules, version, generation) in enumerate(observations):
             end = min(boundary, observations[index + 1][0]) if index + 1 < len(observations) else boundary
             start = max(timestamp, since) if since is not None else timestamp
             previous = None
-            for moment in merge(*(schedule.slots(start, end, zone=frame)
+            for moment in merge(*(schedule.slots(start, end, zone=local_timezone)
                                   for schedule in schedules)):
                 if moment != previous:
                     yield (repository, identifier, moment, version, generation)

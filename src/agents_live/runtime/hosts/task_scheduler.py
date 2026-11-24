@@ -39,18 +39,16 @@ import sys
 import tempfile
 import xml.etree.ElementTree as ET
 from collections.abc import Sequence
-from datetime import UTC, datetime, timedelta, tzinfo
+from datetime import datetime, timedelta, timezone, tzinfo
 from hashlib import sha256
 from math import gcd
 from pathlib import Path, PureWindowsPath
 
 try:
     from ...legacy import triggers
-    from .. import utc
     from . import system as hostruntime
 except ImportError:  # flat execution: sibling scripts import this flat
     from legacy import triggers  # type: ignore[no-redef]
-    from runtime import utc  # type: ignore[no-redef]
     from runtime.hosts import system as hostruntime  # type: ignore[no-redef]
 
 # Every registration this tool makes lives here, so the enumeration a
@@ -94,13 +92,6 @@ LOGON_TYPE = "InteractiveToken"
 _SAFE_AGENT_NAME = re.compile(r"[A-Za-z0-9_][A-Za-z0-9._-]*")
 
 _INTERVAL_MINUTE = re.compile(r"\*/(\d{1,4})")
-
-# Task Scheduler names calendar units with elements, not numbers.
-_WEEKDAY_ELEMENTS = ("Sunday", "Monday", "Tuesday", "Wednesday", "Thursday",
-                     "Friday", "Saturday")
-_MONTH_ELEMENTS = ("January", "February", "March", "April", "May", "June",
-                   "July", "August", "September", "October", "November",
-                   "December")
 
 # argv[0] is parsed by rules of its own, so round-trip verification
 # prepends a token that cannot be confused with the arguments under test.
@@ -421,13 +412,17 @@ def _format_interval(minutes: int) -> str:
 
 
 def translate(schedule: str) -> list[dict[str, object]]:
-    """Native trigger that fires at least whenever *schedule* says.
+    """Native triggers that fire at least whenever *schedule* says.
 
-    Compile each cron expression into exactly one native Windows Task Scheduler
-    trigger. Prefer an exact calendar trigger with a bounded repetition that
-    resets at the cron expression's natural period boundary. When one trigger
-    cannot preserve the expression exactly, install the lowest-frequency single-
-    trigger superset and retain dispatch-time cron filtering.
+    One daily calendar trigger per scheduled hour, each starting at that
+    hour's first scheduled minute on the local wall clock. Task Scheduler
+    repeats a trigger on elapsed time, not wall-clock time, so repetition
+    stays inside the hour: a daylight saving or time zone change can then
+    disturb only the runs in the hour it happens in, and every later hour
+    starts again on the local clock. Minutes that are not one evenly
+    stepped list are covered by their common step, and day, weekday and
+    month restrictions are left to the dispatch due check that every host
+    shares, so Windows and Linux decide a firing the same way.
     """
     text = schedule.strip()
     if text == triggers.BOOT:
@@ -438,198 +433,84 @@ def translate(schedule: str) -> list[dict[str, object]]:
     except triggers.ScheduleSyntaxError as exc:
         raise ScheduleNotTranslatable(str(exc)) from exc
 
-    minute_token, hour_token, dom_token, month_token, dow_token = text.split()
-    calendar_restricted = (dom_token, month_token, dow_token) != ("*", "*", "*")
-
-    # 1. Always a daily trigger. Its boundary is an absolute UTC instant
-    # (see _boundary), and Task Scheduler does not say which zone's calendar
-    # day a weekly or monthly trigger with such a boundary uses, so day,
-    # weekday and month restrictions are left to dispatch, which checks
-    # them at UTC plus the agent's stored offset (#609).
-    cal_kind = "daily"
-    cal_exact = not calendar_restricted
-    cal_fallback = (
-        "day, weekday and month restrictions are checked at dispatch; "
-        "covered with daily trigger"
-    ) if calendar_restricted else None
-
-    # 2. Determine Time Pattern, Repetition, Interval, and Duration
-    sorted_hours = sorted(hours)
-    sorted_minutes = sorted(minutes)
-    len_h = len(sorted_hours)
-    len_m = len(sorted_minutes)
-
-    if len_h == 1 and len_m == 1:
-        start_hour = sorted_hours[0]
-        start_minute = sorted_minutes[0]
-        interval = None
-        duration = None
-        interval_minutes = None
-        duration_minutes = None
-        time_exact = True
-        time_fallback = None
-    elif len_m == 1:
-        start_minute = sorted_minutes[0]
-        h0 = sorted_hours[0]
-        step_h = sorted_hours[1] - h0 if len_h > 1 else 1
-        is_arithmetic = (len_h > 1) and all(
-            sorted_hours[i] - sorted_hours[i - 1] == step_h for i in range(1, len_h)
-        )
-        if is_arithmetic:
-            start_hour = h0
-            interval_minutes = step_h * 60
-            interval = _format_interval(interval_minutes)
-            if h0 == 0 and (len_h * step_h >= 24):
-                duration_minutes = 1440
-                duration = "P1D"
-            else:
-                span_h = sorted_hours[-1] - h0
-                duration_minutes = span_h * 60 + 1
-                duration = _format_duration(duration_minutes)
-            time_exact = True
-            time_fallback = None
-        else:
-            start_hour = sorted_hours[0]
-            step_gcd = sorted_hours[1] - sorted_hours[0]
-            for i in range(2, len_h):
-                step_gcd = gcd(step_gcd, sorted_hours[i] - sorted_hours[i - 1])
-            interval_minutes = step_gcd * 60
-            interval = _format_interval(interval_minutes)
-            span_h = sorted_hours[-1] - sorted_hours[0]
-            duration_minutes = span_h * 60 + 1
-            duration = _format_duration(duration_minutes)
-            time_exact = False
-            time_fallback = (
-                "irregular hour list; covered with common hour step and dispatch filtering"
-            )
-    else:
-        step_m = sorted_minutes[1] - sorted_minutes[0] if len_m > 1 else 1
-        is_divisor_minute_step = (
-            sorted_minutes[0] == 0
-            and 60 % step_m == 0
-            and sorted_minutes == list(range(0, 60, step_m))
-        )
-        is_contiguous_hours = (
-            sorted_hours == list(range(sorted_hours[0], sorted_hours[-1] + 1))
-        )
-        if is_divisor_minute_step and is_contiguous_hours:
-            start_hour = sorted_hours[0]
-            start_minute = 0
-            interval_minutes = step_m
-            interval = _format_interval(interval_minutes)
-            if len_h == 24:
-                duration_minutes = 1440
-                duration = "P1D"
-            else:
-                duration_minutes = (sorted_hours[-1] - sorted_hours[0]) * 60 + sorted_minutes[-1] + 1
-                duration = _format_duration(duration_minutes)
-            time_exact = True
-            time_fallback = None
-        else:
-            candidate_divisors = (60, 30, 20, 15, 12, 10, 6, 5, 4, 3, 2, 1)
-            best_d = 1
-            best_anchor = 0
-            for d in candidate_divisors:
-                phases = {m % d for m in minutes}
-                if len(phases) == 1:
-                    best_d = d
-                    best_anchor = next(iter(phases))
-                    break
-            start_hour = sorted_hours[0]
-            start_minute = best_anchor
-            interval_minutes = best_d
-            interval = _format_interval(interval_minutes)
-            if len_h == 24:
-                duration_minutes = 1440
-                duration = "P1D"
-            else:
-                duration_minutes = (sorted_hours[-1] - sorted_hours[0]) * 60 + (sorted_minutes[-1] - best_anchor) + 1
-                duration = _format_duration(duration_minutes)
-            time_exact = False
-            if _INTERVAL_MINUTE.fullmatch(minute_token):
-                time_fallback = (
-                    "non-divisor minute step drifts across hours; covered with safe divisor step"
-                )
-            else:
-                time_fallback = (
-                    "irregular minute list; covered with greatest safe divisor step"
-                )
-
-    exact = cal_exact and time_exact
-    fallback_reason = cal_fallback or time_fallback
-
-    trigger: dict[str, object] = {
-        "kind": cal_kind,
-        "hour": start_hour,
-        "minute": start_minute,
-        "exact": exact,
-        "fallback_reason": fallback_reason,
-    }
-
-    if interval is not None:
-        trigger["interval"] = interval
-        trigger["interval_minutes"] = interval_minutes
-        if duration is not None:
-            trigger["duration"] = duration
-            trigger["duration_minutes"] = duration_minutes
-
-    return [trigger]
+    _minute, _hour, dom_token, month_token, dow_token = text.split()
+    ordered = sorted(minutes)
+    first, last = ordered[0], ordered[-1]
+    step = 0
+    for minute in ordered[1:]:
+        step = gcd(step, minute - first)
+    reasons = []
+    if (dom_token, month_token, dow_token) != ("*", "*", "*"):
+        reasons.append("day, weekday and month restrictions are checked at dispatch")
+    if step and ordered != list(range(first, last + 1, step)):
+        reasons.append("irregular minute list; covered with its common step")
+    found: list[dict[str, object]] = []
+    for hour in sorted(hours):
+        trigger: dict[str, object] = {
+            "kind": "daily",
+            "hour": hour,
+            "minute": first,
+            "exact": not reasons,
+            "fallback_reason": "; ".join(reasons) or None,
+        }
+        if step:
+            trigger["interval"] = _format_interval(step)
+            trigger["interval_minutes"] = step
+            trigger["duration"] = _format_duration(last - first + 1)
+            trigger["duration_minutes"] = last - first + 1
+        found.append(trigger)
+    return found
 
 
-def _covering_interval(minutes: set[int]) -> dict[str, object]:
-    """A repetition whose fires include every minute in *minutes*."""
-    anchor = min(minutes)
-    step = 60
-    for value in minutes:
-        step = gcd(step, value - anchor)
-    return {"kind": "interval", "minutes": step, "anchor_minute": anchor % step}
+# Task Scheduler refuses a task with more triggers than this
+# (learn.microsoft.com/windows/win32/taskschd/task-triggers).
+MAX_TRIGGERS = 48
 
 
-def _utc_text(moment: datetime) -> str:
-    """*moment* as an explicit UTC boundary, ending in ``Z``.
+def _task_triggers(schedules: Sequence[str]) -> list[dict[str, object]]:
+    """Every trigger *schedules* need, once each, within the store's limit."""
+    found: dict[tuple, dict[str, object]] = {}
+    for schedule in schedules:
+        for trigger in translate(schedule):
+            found.setdefault(_signature_of(trigger), trigger)
+    if len(found) > MAX_TRIGGERS:
+        raise ScheduleNotTranslatable(
+            f"{', '.join(schedules)} needs {len(found)} Task Scheduler triggers, "
+            f"one per scheduled hour, and a task can hold at most {MAX_TRIGGERS}; "
+            "combine or simplify the schedules")
+    return list(found.values())
 
-    Task Scheduler reads a boundary without an offset in whatever zone it
-    currently assumes, which can differ from the zone a process sees and
-    from the zone the agent was registered in, so a daily firing moved by
-    an hour and dispatch skipped it as ``not-due`` (#609). A boundary in
-    UTC names one instant on every computer and in every zone.
+
+def _wall_clock(moment: datetime) -> str:
+    """*moment* as local wall-clock text with no zone suffix.
+
+    Task Scheduler runs a boundary without ``Z`` or an offset at that
+    wall-clock time in whatever zone the computer is in when it fires, so
+    the trigger follows daylight saving and time zone changes exactly as
+    the dispatch due check, which reads current local time, does (#609).
     """
-    return moment.astimezone(UTC).replace(tzinfo=None).isoformat(
-        timespec="seconds") + "Z"
+    return moment.replace(tzinfo=None).isoformat(timespec="seconds")
 
 
 def _boundary(trigger: dict[str, object], now: datetime) -> str:
-    """Keep an active daily period's phase, otherwise choose a future start.
-
-    *now* carries the agent's fixed registration offset, which is the
-    frame the trigger's hours and minutes are in; the result is UTC.
-    """
-    return _utc_text(_boundary_moment(trigger, now))
+    """Keep an active daily period's phase, otherwise choose a future start."""
+    return _wall_clock(_boundary_moment(trigger, now))
 
 
 def _boundary_moment(trigger: dict[str, object], now: datetime) -> datetime:
     start = now.replace(second=0, microsecond=0)
     if trigger["kind"] == "boot":
         return start
-    target_hour = int(trigger["hour"])
-    target_minute = int(trigger["minute"])
-    start = start.replace(hour=target_hour, minute=target_minute)
+    start = start.replace(hour=int(trigger["hour"]), minute=int(trigger["minute"]))
     interval = int(trigger.get("interval_minutes") or 0)
     duration = int(trigger.get("duration_minutes") or 0)
     if interval and duration and start <= now:
         elapsed = (now - start).total_seconds()
         following = (int(elapsed // (interval * 60)) + 1) * interval
-        if trigger["kind"] == "daily" and following < duration:
+        if following < duration:
             return start
-    if trigger["kind"] == "daily":
-        if start <= now:
-            start += timedelta(days=1)
-        return start
-    step = int(trigger.get("minutes") or trigger.get("interval_minutes") or 60)
-    anchor = int(trigger.get("anchor_minute") or target_minute)
-    start = start.replace(minute=0) + timedelta(minutes=anchor)
-    while start <= now:
-        start += timedelta(minutes=step)
+    if start <= now:
+        start += timedelta(days=1)
     return start
 
 
@@ -659,40 +540,26 @@ def _append_trigger(parent: ET.Element, trigger: dict[str, object],
     element = _child(parent, "CalendarTrigger")
     _child(element, "StartBoundary", _boundary(trigger, now))
     _child(element, "Enabled", "true")
-
     if trigger.get("interval"):
         repetition = _child(element, "Repetition")
         _child(repetition, "Interval", str(trigger["interval"]))
-        if trigger.get("duration"):
-            _child(repetition, "Duration", str(trigger["duration"]))
+        _child(repetition, "Duration", str(trigger["duration"]))
         _child(repetition, "StopAtDurationEnd", "false")
-
-    if trigger["kind"] == "daily":
-        schedule = _child(element, "ScheduleByDay")
-        _child(schedule, "DaysInterval", "1")
-        return
-
-    element = _child(parent, "TimeTrigger")
-    _child(element, "StartBoundary", _boundary(trigger, now))
-    _child(element, "Enabled", "true")
-    repetition = _child(element, "Repetition")
-    _child(repetition, "Interval", f"PT{int(trigger['minutes'])}M")
-    _child(repetition, "StopAtDurationEnd", "false")
+    schedule = _child(element, "ScheduleByDay")
+    _child(schedule, "DaysInterval", "1")
 
 
 def build_task_xml(*, command: str, arguments: str, working_dir: str,
                    schedules: Sequence[str], description: str, uri: str,
-                   user_id: str, now: datetime | None = None,
-                   utc_offset: str | None = None) -> str:
+                   user_id: str, now: datetime | None = None) -> str:
     """The task definition document for one agent.
 
     Built as a tree rather than a template so a repository path that
     contains an ampersand or a quote is escaped by the XML writer
-    instead of by hand. *schedules* are read at UTC plus *utc_offset*
-    (the agent's registration offset; UTC when None) and every boundary
-    is written in UTC.
+    instead of by hand. *now* is local time; only its wall-clock fields
+    are used.
     """
-    now = (now or datetime.now(UTC)).astimezone(_frame_zone(utc_offset))
+    now = now or datetime.now().astimezone()
     ET.register_namespace("", _NS)
     task = ET.Element(f"{{{_NS}}}Task", {"version": _TASK_VERSION})
 
@@ -701,9 +568,8 @@ def build_task_xml(*, command: str, arguments: str, working_dir: str,
     _child(registration, "URI", uri)
 
     trigger_parent = _child(task, "Triggers")
-    for schedule in schedules:
-        for trigger in translate(schedule):
-            _append_trigger(trigger_parent, trigger, now, user_id)
+    for trigger in _task_triggers(schedules):
+        _append_trigger(trigger_parent, trigger, now, user_id)
 
     principals = _child(task, "Principals")
     principal = ET.SubElement(principals, f"{{{_NS}}}Principal", {"id": "Author"})
@@ -976,18 +842,13 @@ def trigger_signature(schedules: Sequence[str]) -> list[tuple]:
     boundary means (the phase of a repetition, the time of day of a
     calendar trigger) and drops when it was chosen.
     """
-    return sorted(_signature_of(trigger)
-                  for schedule in schedules
-                  for trigger in translate(schedule))
+    return sorted(_signature_of(trigger) for trigger in _task_triggers(schedules))
 
 
 def _signature_of(trigger: dict[str, object]) -> tuple:
     kind = trigger["kind"]
     if kind == "boot":
         return ("logon",)
-    if kind == "interval":
-        return ("interval", int(trigger["minutes"]),
-                int(trigger["anchor_minute"]))
     rep_interval = trigger.get("interval_minutes")
     rep_duration = trigger.get("duration_minutes")
     rep_part = (int(rep_interval), int(rep_duration or 0)) if rep_interval is not None else ()
@@ -1023,96 +884,66 @@ def _trigger_elements(document: str) -> list[ET.Element] | None:
     return [] if parent is None else list(parent)
 
 
-def _frame_zone(utc_offset: str | None) -> tzinfo:
-    """The fixed zone a schedule is read in: the stored offset, else UTC."""
-    return utc.zone(utc_offset) if utc_offset else UTC
-
-
-def registered_offset(document: str) -> str | None:
-    """The ``--utc-offset`` a registered definition's action passes, or None."""
-    action = _definition_action(document)
-    return utc.offset_in(action[1]) if action else None
-
-
 def _definition_signature(document: str, *,
                           zone: tzinfo | None = None) -> list[tuple]:
     """The same signature, read back out of a registered definition.
 
-    A boundary is read in *zone*, by default the fixed zone of the
-    offset the definition's own action passes to dispatch (UTC when it
-    passes none), which is the frame the schedule was translated in. A
-    boundary without an offset reads its fields as written.
+    A boundary without a zone suffix is local wall-clock time, which is
+    how Task Scheduler evaluates it, so its fields are read as written.
+    A boundary with ``Z`` or an offset is a fixed instant, read in *zone*
+    (the current local zone by default), so one pinned before a daylight
+    saving or time zone change reads as firing at a different local time
+    than its schedule asks for (#609). Only an enabled daily calendar
+    trigger reads as ``daily``; a disabled one, another day interval or any
+    other shape reads as something this tool never writes, so it is
+    reported as drift and maintenance registers it again.
     """
-    if zone is None:
-        zone = _frame_zone(registered_offset(document))
-    elements = _trigger_elements(document)
     found: list[tuple] = []
-    for element in elements or []:
+    for element in _trigger_elements(document) or []:
         tag = element.tag.rsplit("}", 1)[-1]
+        enabled = element.findtext(f"{{{_NS}}}Enabled", default="true").strip() != "false"
         if tag == "LogonTrigger":
-            found.append(("logon",))
+            found.append(("logon",) if enabled else ("logon", "disabled"))
             continue
         boundary = element.findtext(f"{{{_NS}}}StartBoundary", default="")
         try:
-            start = datetime.fromisoformat(boundary)
-            if start.tzinfo is not None:
-                start = start.astimezone(zone)
+            start = datetime.fromisoformat(boundary.strip())
         except ValueError:
+            found.append((tag, "unreadable boundary"))
             continue
-        if tag == "TimeTrigger":
-            minutes = _interval_minutes(element.findtext(
-                f".//{{{_NS}}}Interval", default=""))
-            if minutes is None:
-                continue
-            found.append(("interval", minutes, start.minute % minutes))
-            continue
-
+        if start.tzinfo is not None:
+            start = start.astimezone(zone) if zone else start.astimezone()
         rep_part = ()
         rep_elem = element.find(f"{{{_NS}}}Repetition")
         if rep_elem is not None:
-            interval_str = rep_elem.findtext(f"{{{_NS}}}Interval", default="")
+            int_mins = _interval_minutes(
+                rep_elem.findtext(f"{{{_NS}}}Interval", default=""))
             duration_str = rep_elem.findtext(f"{{{_NS}}}Duration", default="")
-            int_mins = _interval_minutes(interval_str)
             dur_mins = _interval_minutes(duration_str) if duration_str else 0
             if int_mins is not None:
                 rep_part = (int_mins, dur_mins)
-
-        if element.find(f".//{{{_NS}}}ScheduleByWeek") is not None:
-            days_elem = element.find(f".//{{{_NS}}}DaysOfWeek")
-            weekdays = tuple(sorted(
-                index for index, name in enumerate(_WEEKDAY_ELEMENTS)
-                if days_elem is not None and days_elem.find(f"{{{_NS}}}{name}") is not None
-            ))
-            found.append(("weekly", weekdays, start.hour, start.minute, *rep_part))
+        days = element.findtext(f"{{{_NS}}}ScheduleByDay/{{{_NS}}}DaysInterval")
+        if enabled and days is not None and days.strip() == "1":
+            found.append(("daily", start.hour, start.minute, *rep_part))
             continue
-        if element.find(f".//{{{_NS}}}ScheduleByMonth") is not None:
-            days = tuple(sorted(
-                int(d.text) for d in element.findall(f".//{{{_NS}}}DaysOfMonth/{{{_NS}}}Day")
-                if d.text and d.text.isdigit()
-            ))
-            months = tuple(sorted(
-                index for index, name in enumerate(_MONTH_ELEMENTS, 1)
-                if element.find(f".//{{{_NS}}}Months/{{{_NS}}}{name}") is not None
-            ))
-            found.append(("monthly", days, months, start.hour, start.minute, *rep_part))
-            continue
-        found.append(("daily", start.hour, start.minute, *rep_part))
+        state = "enabled" if enabled else "disabled"
+        found.append((tag, state, f"days {days.strip() if days else 'none'}",
+                      start.hour, start.minute, *rep_part))
     return sorted(found)
 
 
-# How a registered clock trigger keeps time: as UTC instants (the only form
-# this tool writes), on the scheduler's assumed wall clock (written before
-# #609), or pinned to a non-UTC offset.
-UTC_FORM = "utc"
+# How a registered clock trigger keeps time: on the local wall clock (the
+# only form this tool writes), or pinned to the instant a ``Z`` or offset
+# boundary names.
 LOCAL = "local"
 PINNED = "pinned"
 
 
 def boundary_form(document: str) -> str | None:
-    """UTC_FORM, LOCAL, PINNED, or None for a definition with no clock boundary.
+    """LOCAL, PINNED, or None for a definition with no clock boundary.
 
-    Any boundary not in UTC makes the whole definition that form, so it
-    compares as changed and is registered again (#609).
+    One pinned boundary pins the task: that trigger stops following the
+    computer's zone while the due check does not (#609).
     """
     form = None
     for element in _trigger_elements(document) or []:
@@ -1123,11 +954,9 @@ def boundary_form(document: str) -> str | None:
             start = datetime.fromisoformat(boundary.strip())
         except ValueError:
             return PINNED
-        if start.tzinfo is None:
-            return LOCAL
-        if start.utcoffset() != timedelta(0):
+        if start.tzinfo is not None:
             return PINNED
-        form = UTC_FORM
+        form = LOCAL
     return form
 
 
@@ -1145,7 +974,7 @@ def desired_trigger_identity(schedules: Sequence[str]) -> str | None:
     signature = trigger_signature(schedules)
     if all(entry == ("logon",) for entry in signature):
         return None
-    return _trigger_identity(UTC_FORM, signature)
+    return _trigger_identity(LOCAL, signature)
 
 
 def registered_trigger_identity(document: str, *,
@@ -1166,13 +995,9 @@ def registered_trigger_identity(document: str, *,
 def trigger_drift(document: str, schedules: Sequence[str], *,
                   zone: tzinfo | None = None) -> str | None:
     """Why a registered definition will not fire as *schedules* ask, or None."""
-    form = boundary_form(document)
-    if form == LOCAL:
-        return ("start boundary has no UTC offset, so Task Scheduler reads it "
-                "in whatever time zone it assumes")
-    if form == PINNED:
-        return ("start boundary is pinned to a non-UTC offset; this version "
-                "writes UTC boundaries")
+    if boundary_form(document) == PINNED:
+        return ("start boundary is pinned to a UTC offset, so it will not "
+                "follow daylight saving or time zone changes")
     registered = _definition_signature(document, zone=zone)
     desired = trigger_signature(schedules)
     if registered != desired:
@@ -1193,63 +1018,72 @@ def registered_boundaries(document: str) -> list[str]:
 
 
 def simulate_firings(
-    trigger: dict[str, object],
+    trigger_list: Sequence[dict[str, object]],
     schedule: str,
     start: datetime,
     end: datetime,
 ) -> tuple[list[datetime], list[datetime]]:
-    """Simulate due firings and native Task Scheduler firings over a range.
+    """Due firings and native Task Scheduler firings from *start* to *end*.
 
-    Returns (due_firings, native_firings).
+    Returns (due_firings, native_firings) in *start*'s zone. Task Scheduler
+    starts a daily calendar trigger at its local wall-clock time each day
+    and repeats it on elapsed time, so the simulation steps through real
+    instants: a zone whose offset changes inside a repetition shows the
+    later repetitions moving on the local clock, as they do on Windows.
+    The due check reads each instant's local wall clock, as dispatch does.
+    Naive *start* and *end* are a clock without transitions.
     """
+    zone = start.tzinfo
+
+    def instant(moment: datetime) -> datetime:
+        return moment if zone is None else moment.astimezone(timezone.utc)
+
+    def local(moment: datetime) -> datetime:
+        return moment if zone is None else moment.astimezone(zone)
+
+    first, last = instant(start), instant(end)
     due: list[datetime] = []
-    curr = start
-    if curr <= end:
+    if first <= last:
         matches = triggers._schedule_matcher(schedule)
-        while curr <= end:
-            if matches(curr):
-                due.append(curr)
-            curr += timedelta(minutes=1)
+        moment = first
+        while moment <= last:
+            if matches(local(moment)):
+                due.append(local(moment))
+            moment += timedelta(minutes=1)
 
     native: list[datetime] = []
-    day_step = timedelta(days=1)
-    day = start.replace(hour=0, minute=0, second=0, microsecond=0)
-    end_day = end.replace(hour=0, minute=0, second=0, microsecond=0)
-    while day <= end_day:
-        if trigger["kind"] == "daily":
-            fire_time = day.replace(
-                hour=int(trigger["hour"]), minute=int(trigger["minute"]),
-                tzinfo=start.tzinfo,
-            )
-            if start <= fire_time <= end:
-                native.append(fire_time)
-            if trigger.get("interval_minutes"):
-                int_m = int(trigger["interval_minutes"])
-                dur_m = int(trigger.get("duration_minutes") or 1440)
-                offset = int_m
-                while offset < dur_m:
-                    rep_time = fire_time + timedelta(minutes=offset)
-                    if start <= rep_time <= end:
-                        native.append(rep_time)
-                    offset += int_m
-        day += day_step
+    day = start.date()
+    while day <= end.date() + timedelta(days=1):
+        for trigger in trigger_list:
+            if trigger["kind"] != "daily":
+                continue
+            wall = datetime(day.year, day.month, day.day, int(trigger["hour"]),
+                            int(trigger["minute"]), tzinfo=zone)
+            fire = instant(wall)
+            interval = int(trigger.get("interval_minutes") or 0)
+            duration = int(trigger.get("duration_minutes") or 0)
+            elapsed = 0
+            while True:
+                moment = fire + timedelta(minutes=elapsed)
+                if first <= moment <= last:
+                    native.append(local(moment))
+                elapsed += interval
+                if not interval or elapsed >= duration:
+                    break
+        day += timedelta(days=1)
+    native.sort(key=instant)
     return due, native
 
 
 def diagnostics(schedule: str, now: datetime | None = None, *,
-                registered: str | None = None,
-                utc_offset: str | None = None) -> dict[str, object]:
+                registered: str | None = None) -> dict[str, object]:
     """Expose translation details for a cron expression on Windows.
-
-    The schedule is read at UTC plus *utc_offset*, taken from *registered*
-    when not given, otherwise the current local offset that registering
-    now would capture.
 
     Reports:
     - canonical: the normalized cron expression
-    - utc_offset: the fixed offset the schedule is read at
-    - native_trigger: kind, interval, duration, boundary (UTC) and
-      boundary_local (local time with a short zone name, for display)
+    - native_trigger: kind, number of triggers (one per scheduled hour),
+      the repetition inside each hour, and the first trigger's boundary
+      (local wall clock, as registered)
     - exact: whether native firings match cron without extra wake-ups;
       false whenever *registered* does not fire as the schedule asks
     - fallback_reason: why covering was chosen if not exact
@@ -1260,11 +1094,8 @@ def diagnostics(schedule: str, now: datetime | None = None, *,
     - registered_trigger: only with *registered*, the task definition Task
       Scheduler holds: its boundaries, whether it matches, and why not
     """
-    if utc_offset is None and registered is not None:
-        utc_offset = registered_offset(registered)
-    # Not yet registered: show what registering now would capture.
-    zone = _frame_zone(utc_offset or utc.current_offset())
-    now = (now or datetime.now(UTC)).astimezone(zone)
+    now = now or datetime.now().astimezone()
+    zone = now.tzinfo
     text = schedule.strip()
     canonical = triggers._SPECIAL_SCHEDULES.get(text.lower(), text)
     triggers_list = translate(schedule)
@@ -1274,6 +1105,7 @@ def diagnostics(schedule: str, now: datetime | None = None, *,
             "canonical": triggers.BOOT,
             "native_trigger": {
                 "kind": "boot",
+                "triggers": 1,
                 "interval": None,
                 "duration": None,
                 "boundary": "on logon",
@@ -1286,8 +1118,7 @@ def diagnostics(schedule: str, now: datetime | None = None, *,
             "summary": "exact logon trigger",
         }
 
-    boundary_moment = _boundary_moment(trig, now)
-    boundary_str = _utc_text(boundary_moment)
+    boundary_str = _boundary(trig, now)
     exact = bool(trig.get("exact", True))
     fallback_reason = trig.get("fallback_reason")
 
@@ -1306,7 +1137,7 @@ def diagnostics(schedule: str, now: datetime | None = None, *,
         ref_start = datetime(2026, 9, 8, 0, 0, tzinfo=zone)
         ref_end = datetime(2026, 9, 8, 23, 59, 59, tzinfo=zone)
 
-    due_list, native_list = simulate_firings(trig, canonical, ref_start, ref_end)
+    due_list, native_list = simulate_firings(triggers_list, canonical, ref_start, ref_end)
     native_count = len(native_list)
     due_count = len(due_list)
 
@@ -1321,13 +1152,12 @@ def diagnostics(schedule: str, now: datetime | None = None, *,
 
     result: dict[str, object] = {
         "canonical": canonical,
-        "utc_offset": utc.format_offset(now.utcoffset() or timedelta()),
         "native_trigger": {
             "kind": kind,
+            "triggers": len(triggers_list),
             "interval": trig.get("interval"),
             "duration": trig.get("duration"),
             "boundary": boundary_str,
-            "boundary_local": utc.display(boundary_moment),
         },
         "exact": exact,
         "fallback_reason": fallback_reason,

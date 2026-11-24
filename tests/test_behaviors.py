@@ -31,7 +31,7 @@ import unittest
 import venv
 import warnings
 import zipfile
-from datetime import UTC, datetime, timedelta, timezone, tzinfo
+from datetime import datetime, timedelta, timezone
 from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
@@ -56,7 +56,7 @@ from agents_live.obs.events import append as append_event
 from agents_live.agent.values import McpServer, RawOutput, Request, ResolvedSpec
 from agents_live.dispatch import Firing, dispatch
 from agents_live.runtime import ChildResult, ProcessRef, Subscription
-from agents_live.runtime import artifacts, utc
+from agents_live.runtime import artifacts
 from agents_live.runtime.hosts import crontab as crontasks
 from agents_live.runtime.hosts import system as hostruntime
 from agents_live.runtime.hosts import windows as windowshost
@@ -513,7 +513,7 @@ class TestOwnershipEnforcement(TempRepository):
                 if not duplicate:
                     self.assertFalse(state.load(self.root).initialized)
 
-    def test_doctor_fails_a_clock_trigger_registered_without_utc(self):
+    def test_doctor_fails_a_clock_trigger_pinned_to_a_stale_utc_offset(self):
         """doctor reports a registered boundary that no longer fires on the cron (#609)."""
         from agents_live.runtime.hosts import task_scheduler
         self.skill("twice-daily", [
@@ -530,16 +530,14 @@ class TestOwnershipEnforcement(TempRepository):
             scope=f"repo:{self.root.resolve()}", target=f"agent:{spec.identifier}",
             kind="schedule", trigger="0 */12 * * *").key
         current = task_scheduler.build_task_xml(
-            command="agents-live.exe", arguments="run --utc-offset=-04:00",
-            working_dir=str(self.root),
+            command="agents-live.exe", arguments="run", working_dir=str(self.root),
             schedules=["0 */12 * * *"], description="fixture", uri="fixture",
-            user_id="user", utc_offset="-04:00",
+            user_id="user",
             now=datetime(2026, 10, 29, 10, tzinfo=timezone(timedelta(hours=-4))))
-        # Midnight at the registered -04:00 offset, written as UTC.
-        self.assertIn("<StartBoundary>2026-10-29T04:00:00Z</StartBoundary>", current)
         stale = current.replace(
-            "<StartBoundary>2026-10-29T04:00:00Z</StartBoundary>",
-            "<StartBoundary>2026-10-29T00:00:00</StartBoundary>")
+            "<StartBoundary>2026-10-29T12:00:00</StartBoundary>",
+            "<StartBoundary>2026-10-29T12:00:00-04:00</StartBoundary>")
+        self.assertNotEqual(current, stale)
         for document, healthy in ((stale, False), (current, True)):
             with self.subTest(healthy=healthy):
                 host.trigger_store.registered_definition = {key: document}.get
@@ -558,12 +556,12 @@ class TestOwnershipEnforcement(TempRepository):
                 text = output.getvalue()
                 if healthy:
                     self.assertEqual(0, code, text)
-                    self.assertIn("ok: schedule triggers: 1 registered in UTC", text)
+                    self.assertIn("ok: schedule triggers: 1 registered on local time", text)
                 else:
                     self.assertEqual(1, code, text)
                     self.assertIn(
                         f"ERROR: schedule trigger {spec.identifier}: 0 */12 * * *: "
-                        "start boundary has no UTC offset", text)
+                        "start boundary is pinned to a UTC offset", text)
 
 
 class TestCrontabTriggerStore(TempRepository):
@@ -689,177 +687,36 @@ class TestCrontabTriggerStore(TempRepository):
                     decoded.origin,
                 )
 
-    def test_clock_entry_wakes_hourly_at_its_minute_and_keeps_its_offset(self) -> None:
-        """The crontab line keeps only the minute; dispatch decides in UTC (#609)."""
-        from agents_live.runtime import convergence
-        from dataclasses import replace
+    def test_clock_entry_is_the_schedule_on_the_daemons_local_clock(self) -> None:
+        """The cron line is the schedule itself, read on the daemon's local
+        wall clock as dispatch reads it, with no stored zone (#609)."""
+        rendered = self._rendered("sample", "12 3 * * 1").rendered
+        fields, command = rendered.split(" ", 5)[:5], rendered.split(" ", 5)[5]
+        self.assertEqual(["12", "3", "*", "*", "1"], fields)
+        self.assertNotIn("offset", command)
+        self.assertNotIn("utc", command.lower())
 
-        subscription = Subscription.create(
-            scope=f"repo:{self.root}", target="agent:sample",
-            kind="schedule", trigger="12 3 * * *")
-        desired = PosixHost().render(replace(subscription, utc_offset="+05:30"))
-        self.assertTrue(desired.rendered.startswith("12 * * * * "), desired.rendered)
-        self.assertIn("--utc-offset=+05:30", desired.rendered)
-        self.store.install(desired)
-        self.assertEqual([desired.fingerprint],
-                         [item.fingerprint for item in self.store.list()])
-
-        # The installed offset is kept even after the local offset changes,
-        # so daylight saving never re-registers or moves the wake.
-        with mock.patch.object(convergence.utc, "current_offset", return_value="+04:00"):
-            kept, new = convergence.with_utc_offsets(
-                [subscription, replace(subscription, target="agent:other")],
-                self.store.list())
-        self.assertEqual("+05:30", kept.utc_offset)
-        self.assertEqual("+04:00", new.utc_offset)
-
-        # An entry written before #609 carries no offset and compares changed.
-        self.table = [line for line in self.table if "agents-live" not in line]
-        self.store.install(PosixHost().render(subscription))
-        legacy = self.store.list()
-        self.assertTrue(legacy[0].rendered.startswith("12 3 * * * "))
-        self.assertNotEqual(desired.fingerprint, legacy[0].fingerprint)
-
-
-def _posix_native_wakes(rendered: str, scheduler: tzinfo,
-                        start: datetime, hours: int) -> list[datetime]:
-    """UTC minutes a cron daemon running in *scheduler* runs *rendered* at."""
-    from agents_live.runtime import parse_schedule
-
-    schedule = parse_schedule(" ".join(rendered.split()[:5]))
-    minutes = (start + timedelta(minutes=step) for step in range(hours * 60))
-    return [moment for moment in minutes
-            if schedule.matches(moment.astimezone(scheduler))]
-
-
-def _windows_native_wakes(document: str, scheduler: tzinfo,
-                          start: datetime, hours: int) -> list[datetime]:
-    """UTC minutes Task Scheduler in *scheduler* starts a daily trigger at.
-
-    A boundary without ``Z`` is read in the scheduler's own zone, which
-    is how #609 moved firings when that zone differed from the process's.
-    """
-    import xml.etree.ElementTree as ET
-
-    ns = {"t": "http://schemas.microsoft.com/windows/2004/02/mit/task"}
-    end = start + timedelta(hours=hours)
-    wakes: set[datetime] = set()
-    for trigger in ET.fromstring(document).iterfind(".//t:CalendarTrigger", ns):
-        text = trigger.findtext("t:StartBoundary", namespaces=ns)
-        boundary = (datetime.fromisoformat(text.removesuffix("Z")).replace(tzinfo=UTC)
-                    if text.endswith("Z") else
-                    datetime.fromisoformat(text).replace(tzinfo=scheduler))
-        interval = trigger.findtext("t:Repetition/t:Interval", namespaces=ns)
-        duration = trigger.findtext("t:Repetition/t:Duration", namespaces=ns)
-        step = _iso_minutes(interval) if interval else None
-        span = _iso_minutes(duration) if duration else 1
-        day = boundary
-        while day < end:
-            offsets = range(0, span, step) if step else (0,)
-            wakes.update(day + timedelta(minutes=item) for item in offsets)
-            day += timedelta(days=1)
-    return sorted(moment.astimezone(UTC) for moment in wakes if start <= moment < end)
-
-
-def _iso_minutes(text: str) -> int:
-    match = re.fullmatch(r"P(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?)?", text)
-    days, hours, minutes = (int(item or 0) for item in match.groups())
-    return days * 1440 + hours * 60 + minutes
-
-
-class TestClockWakesAcrossZones(TempRepository):
-    """Native wakes and the dispatch due check when the scheduler's zone
-    differs from the zone the agent was registered in (#609)."""
-
-    START = datetime(2026, 11, 2, 0, 0, tzinfo=UTC)
-
-    def _subscription(self, cron: str, offset: str) -> Subscription:
-        from dataclasses import replace
-
-        return replace(Subscription.create(
-            scope=f"repo:{self.root}", target="agent:sample",
-            kind="schedule", trigger=cron), utc_offset=offset)
-
-    def _due(self, wakes: list[datetime], cron: str, offset: str) -> list[datetime]:
-        """The wakes dispatch accepts, by the rule dispatch applies."""
-        from agents_live.runtime import parse_schedule, utc
-
-        schedule = parse_schedule(cron)
-        return [moment for moment in wakes
-                if schedule.matches(moment.astimezone(utc.zone(offset)))]
-
-    def _windows_document(self, cron: str, offset: str) -> str:
-        from agents_live.runtime.hosts import task_scheduler
-
-        return task_scheduler.build_task_xml(
-            command="agents-live.exe", arguments="run --name sample",
-            working_dir=str(self.root), schedules=[cron], description="sample",
-            uri="\\agents-live\\sample", user_id="user", now=self.START,
-            utc_offset=offset)
-
-    def test_generated_clock_commands_parse_on_every_supported_python(self) -> None:
-        """argparse before 3.14 reads a separate ``-04:00`` as an option."""
-        from agents_live.cli.main import main as cli_main
-        from agents_live.cli.commands import run as run_command
-
-        for offset in ("-04:00", "+05:30", "+00:00"):
-            subscription = self._subscription("12 3 * * *", offset)
-            posix = PosixHost().render(subscription).rendered
-            command = posix.split(" && ", 1)[1].removesuffix(" 2>&1")
-            windows = json.loads(windowshost.WindowsHost().render(subscription).rendered)
-            for host, argv in (("posix", shlex.split(command)[1:]),
-                               ("windows", windows["argv"][1:])):
-                with self.subTest(host=host, offset=offset):
-                    firings = []
-
-                    def dispatch(firing):
-                        firings.append(firing)
-                        return mock.Mock(ok=True, text="")
-
-                    with mock.patch.dict(os.environ), \
-                            mock.patch.object(run_command, "dispatch", dispatch):
-                        os.environ.pop("AGENTS_LIVE_JSON", None)
-                        self.assertEqual(0, cli_main(list(argv)))
-                    self.assertEqual(1, len(firings))
-                    self.assertEqual(offset, firings[0].utc_offset)
-                    self.assertEqual("clock", firings[0].origin)
-
-    def test_windows_wakes_land_on_the_due_minute_in_any_scheduler_zone(self) -> None:
-        for offset, scheduler in (("+05:30", timezone(timedelta(hours=-7))),
-                                  ("-04:00", timezone(timedelta(hours=1))),
-                                  ("+00:00", timezone(timedelta(hours=5, minutes=45)))):
-            for cron in ("12 3 * * *", "30 9-17/4 * * *", "0 6 * * 1"):
-                with self.subTest(offset=offset, scheduler=scheduler, cron=cron):
-                    wakes = _windows_native_wakes(
-                        self._windows_document(cron, offset), scheduler, self.START, 24 * 8)
-                    expected = _posix_native_wakes(
-                        cron, utc.zone(offset), self.START, 24 * 8)
-                    self.assertTrue(expected)
-                    self.assertEqual(expected, self._due(wakes, cron, offset))
-
-    def test_posix_hourly_wakes_cover_whole_hour_zone_differences(self) -> None:
-        for offset, scheduler in (("-04:00", UTC),
-                                  ("+05:30", timezone(timedelta(hours=1, minutes=30)))):
-            cron = "12 3 * * *"
-            with self.subTest(offset=offset, scheduler=scheduler):
-                rendered = PosixHost().render(self._subscription(cron, offset)).rendered
-                wakes = _posix_native_wakes(rendered, scheduler, self.START, 48)
-                self.assertEqual(48, len(wakes))
-                self.assertEqual(
-                    _posix_native_wakes(cron, utc.zone(offset), self.START, 48),
-                    self._due(wakes, cron, offset))
-
-    @unittest.expectedFailure
-    def test_posix_hourly_wakes_miss_a_fractional_hour_zone_difference(self) -> None:
-        """Known gap held for a developer decision: the hourly line keeps the
-        raw minute, so a daemon zone that differs from the registration
-        offset by a fractional hour never wakes on the due minute."""
-        cron, offset = "12 3 * * *", "+05:30"
-        rendered = PosixHost().render(self._subscription(cron, offset)).rendered
-        wakes = _posix_native_wakes(rendered, UTC, self.START, 48)
-        self.assertEqual(
-            [datetime(2026, 11, 2, 21, 42, tzinfo=UTC)],
-            self._due(wakes, cron, offset))
+    def test_a_crontab_zone_assignment_refuses_clock_entries(self) -> None:
+        """A CRON_TZ or TZ line would make cron and dispatch read different
+        clocks, so clock entries are refused and health reports why (#609)."""
+        from agents_live.runtime.hosts import posix
+        self.assertTrue(PosixHost().health().healthy)
+        for assignment in ("CRON_TZ=UTC", "TZ=Asia/Tokyo", '"CRON_TZ"=UTC',
+                           "  'CRON_TZ' = UTC", '"TZ" = Asia/Tokyo'):
+            with self.subTest(assignment=assignment):
+                self.table = [assignment, "0 3 * * * /home/someone/backup.sh"]
+                before = list(self.table)
+                name = assignment.split("=")[0].strip(" '\"")
+                with self.assertRaisesRegex(RuntimeError, name):
+                    self.store.install(self._rendered("sample"))
+                self.assertEqual(before, self.table)
+                self.store.install(self._rendered("boot", "@reboot"))
+                self.store.install(PosixHost().render(lifecycle.maintenance_subscription()))
+                self.assertEqual(2, len(self.store.list()))
+                health = PosixHost().health()
+                self.assertFalse(health.healthy)
+                self.assertIn("crontab -e", health.detail[0])
+        self.assertIsNone(posix.zone_conflict(["# CRON_TZ=UTC", "MAILTO=me"]))
 
 
 class TestHostMaintenanceEntries(TempRepository):
@@ -3631,40 +3488,32 @@ class TestRunTimingObservability(TempRepository):
         self.runner.run_child.assert_not_called()
         terminal = next(row for row in obs.load(obs.files(
             paths.repo_state_dir(self.root) / "logs")) if row["phase"] == "firing")
-        self.assertEqual(instant.replace(minute=0, second=0).astimezone(timezone.utc).isoformat(),
-                         terminal["planned_at"])
+        self.assertEqual(instant.replace(minute=0, second=0).isoformat(), terminal["planned_at"])
         self.assertEqual("previous-due-minute", terminal["planned_source"])
         self.assertEqual("not-due", terminal["message"])
         self.assertIsNone(terminal["actual_start_at"])
 
-    def test_clock_due_check_uses_registered_offset_not_process_zone(self):
-        """A wake is due when the cron matches UTC plus the registered offset (#609).
-
-        The process zone and the zone the scheduler assumed are both
-        irrelevant, including a half-hour offset the process does not share.
-        """
+    def test_clock_due_check_reads_the_local_wall_clock_whatever_zone_now_carries(self):
+        """Native triggers fire on the local wall clock, so the due check
+        reads the same clock even when the instant arrives in another zone (#609)."""
         definition = self.root / "Agents" / "timed-work" / "SKILL.md"
         definition.write_text(definition.read_text(encoding="utf-8").replace(
             '"* * * * *"', '"0 9 * * *"'), encoding="utf-8")
-        # 03:30 UTC is 09:00 at +05:30, and 23:30 or 22:30 in a US zone.
-        arrival = datetime(2026, 11, 2, 3, 30, 5, tzinfo=timezone.utc)
-        for offset, due in (("+05:30", True), ("-04:00", False), ("+00:00", False)):
-            with self.subTest(offset=offset):
+        local = datetime.now().astimezone().replace(hour=9, minute=0, second=5, microsecond=0)
+        offset = local.utcoffset()
+        for shift, due in ((timedelta(hours=3), True), (timedelta(hours=-1), False)):
+            with self.subTest(shift=shift):
                 self.runner.run_child.reset_mock()
+                # Local 09:00 seen from a zone 3 hours ahead reads 12:00 there;
+                # local 10:00 seen from a zone 1 hour behind reads 09:00 there.
+                instant = local if due else local + timedelta(hours=1)
                 outcome = dispatch(
-                    Firing(self.identifier, str(self.root), "clock", utc_offset=offset),
-                    runner=self.runner,
-                    now=arrival.astimezone(timezone(timedelta(hours=-5))))
-                if due:
-                    self.assertEqual("success", outcome.status)
-                    self.runner.run_child.assert_called_once()
-                else:
-                    self.assertEqual("skipped", outcome.status)
-                    self.runner.run_child.assert_not_called()
-        with self.assertRaises(ValueError):
-            Firing(self.identifier, str(self.root), "clock", utc_offset="+5:30")
+                    Firing(self.identifier, str(self.root), "clock"), runner=self.runner,
+                    now=instant.astimezone(timezone(offset + shift)))
+                self.assertEqual("success" if due else "skipped", outcome.status)
+                self.assertEqual(due, self.runner.run_child.called)
 
-    def test_damaged_history_and_changed_host_timezone_do_not_invent_missed_fires(self):
+    def test_damaged_history_and_changed_timezone_do_not_invent_missed_fires(self):
         from agents_live.obs import clock
 
         baseline = datetime.now(timezone.utc).replace(second=0, microsecond=0) - timedelta(minutes=10)
@@ -3682,22 +3531,13 @@ class TestRunTimingObservability(TempRepository):
             self.assertEqual(0, con.sql(
                 "SELECT count(*) FROM clock_fires WHERE fire_status = 'missed'").fetchall()[0][0])
         log.unlink()
-        # Expected slots follow each agent's registered UTC offset, so a
-        # changed host time zone changes nothing about them (#609).
-        def projection():
-            with qlog.duckdb.connect(":memory:") as con:
-                qlog.build_view(con, qlog.all_log_globs(), repositories=[str(self.root)],
-                                sql="SELECT * FROM clock_fires")
-                return (con.sql("SELECT status FROM clock_coverage").fetchall(),
-                        con.sql("SELECT planned_at, fire_status FROM clock_fires "
-                                "ORDER BY planned_at").fetchall())
-
-        with mock.patch.object(clock, "now", return_value=baseline + timedelta(minutes=5)):
-            unchanged = projection()
-            with mock.patch.object(clock, "timezone_signature",
-                                   return_value="synthetic-changed-timezone"):
-                self.assertEqual(unchanged, projection())
-        self.assertEqual([("retained",)], unchanged[0])
+        with mock.patch.object(clock, "timezone_signature", return_value="synthetic-changed-timezone"), qlog.duckdb.connect(":memory:") as con:
+            qlog.build_view(con, qlog.all_log_globs(), repositories=[str(self.root)],
+                            sql="SELECT * FROM clock_fires")
+            self.assertEqual(("partial",), con.sql(
+                "SELECT status FROM clock_coverage").fetchall()[0])
+            self.assertEqual(0, con.sql(
+                "SELECT count(*) FROM clock_fires WHERE fire_status = 'missed'").fetchall()[0][0])
 
     def test_loaded_generation_survives_selection_change_in_run_and_pipeline_events(self):
         source = REPOSITORY / "src" / "agents_live"
@@ -6113,13 +5953,12 @@ class TestMaintenancePlanning(TempRepository):
         self.assertEqual(2, len(self.host.trigger_store.list()))
 
     def test_concurrent_start_invalidates_removal_and_preserves_new_trigger(self) -> None:
-        from agents_live.runtime import convergence, handoff
+        from agents_live.runtime import handoff
 
         first, second = self.identifiers
         self.assertFalse(lifecycle.converge().failed)
         discovered = lifecycle._discover(self.root)[1]
-        trigger = self.host.render(convergence.with_utc_offsets(
-            [discovered[second][0]], [])[0])
+        trigger = self.host.render(discovered[second][0])
         self.host.trigger_store.install(trigger)
         original_plan = lifecycle.plan_maintenance
         plans = []

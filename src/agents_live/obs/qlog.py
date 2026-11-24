@@ -472,14 +472,14 @@ def _clock_view(con, repositories: tuple[str, ...], *, since=None, until=None,
     for repository in repositories:
         starts = [row[0] for row in snapshots if row[1] == repository]
         unknown = any(row[1] == repository and (
-            row[3] is None or clock.audit_zone(row[6]) is False) for row in snapshots)
+            row[3] is None or row[6] != clock.timezone_signature()) for row in snapshots)
         con.execute("INSERT INTO clock_coverage VALUES (?, ?, ?, ?)", [
             repository, "unavailable" if damaged else "partial" if unknown
             else "retained" if starts else "unobserved",
             min(starts) if starts else None,
             "damaged structured records; missed-fire inference disabled" if damaged else
             "unknown convergence or changed host timezone; affected intervals are not audited" if unknown else
-            "expected slots use retained schedule intent and each agent's registered UTC offset",
+            "expected slots use retained schedule intent and this host's local timezone",
         ])
     lower = datetime.fromisoformat(query.resolve_since(since)) if since else None
     upper = datetime.fromisoformat(query.resolve_since(until)) if until else None

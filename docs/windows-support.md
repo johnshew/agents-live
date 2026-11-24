@@ -36,12 +36,18 @@ One owned Task Scheduler artifact represents one runtime subscription. All
 tasks live under `\AgentsLive\` and carry a structured marker containing
 scope, subscription identity, fingerprint, and process role.
 
-Each cron expression compiles to exactly one native Windows trigger. Exact
-native scheduling is used whenever a calendar trigger with a bounded repetition
-can preserve cron semantics, resetting repetition at the expression's natural
-period boundary (daily, weekly, or monthly). When an expression cannot fit
-exactly in one trigger, the lowest-frequency single-trigger superset is chosen
-and dispatch-time dueness claims the minute. Dueness atomically claims the
+Each cron expression compiles to one daily calendar trigger per scheduled
+hour, starting at that hour's first minute on the local wall clock, with any
+minute repetition kept inside the hour. Task Scheduler repeats on elapsed time,
+so keeping each repetition inside one hour limits a daylight saving or time
+zone change to the runs near it. The one exception is a manual change into
+or out of a 45-minute zone (such as Nepal or Chatham): the trigger that starts
+inside the change still repeats on elapsed time, so runs in the following hour
+can also be missed or repeated, at most two hours once. No daylight saving
+rule does this, and closing it would need per-minute wakes. A task holds at most 48 triggers, so a task
+whose schedules need more is refused. Day, weekday and month restrictions, and
+unevenly spaced minute lists, are covered by these daily wakes and
+dispatch-time dueness claims the minute. Dueness atomically claims the
 minute, so a covering trigger cannot run the same logical firing twice.
 `@reboot` maps to a logon trigger because tasks run in the developer's
 interactive session.

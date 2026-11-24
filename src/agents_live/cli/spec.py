@@ -103,8 +103,6 @@ COMMANDS = (
             Arg(("--no-retry",), "Disable timeout and empty-output retries for this run."),
             Arg(("--metadata",), "Runtime subscription metadata.",
                 kind="value", hidden=True),
-            Arg(("--utc-offset",), "UTC offset a clock wake was registered at.",
-                kind="value", hidden=True),
         ),
     ),
     Cmd(

@@ -16,7 +16,7 @@ from pathlib import Path
 
 from . import agent, obs, runtime, state
 from .agent import Outcome, RawOutput, Request, Step, StepContext
-from .runtime import ChildRunner, handoff, parse_schedule, utc
+from .runtime import ChildRunner, handoff, parse_schedule
 from .runtime.budget import claim as claim_budget
 from .runtime.hosts import system as hostruntime
 from .runtime.hosts.processes import pid_exists
@@ -43,15 +43,10 @@ class Firing:
     options: tuple[tuple[str, str | bool], ...] = ()
     timeout: int | None = None
     no_retry: bool = False
-    # The offset a clock wake was registered at (runtime.utc); its cron is
-    # read at UTC plus this offset. None reads it in the current local zone.
-    utc_offset: str | None = None
 
     def __post_init__(self) -> None:
         if self.origin not in {"clock", "boot", "watch", "manual"}:
             raise ValueError(f"unknown firing origin: {self.origin}")
-        if self.utc_offset is not None:
-            utc.zone(self.utc_offset)
 
 
 def dispatch(
@@ -62,10 +57,9 @@ def dispatch(
 ) -> Outcome:
     firing = replace(firing, root=str(Path(firing.root).resolve()))
     started = time.monotonic()
-    instant = now or datetime.now(UTC)
-    if instant.tzinfo is None:
-        instant = instant.astimezone()
-    instant = instant.astimezone(UTC)
+    # The due check reads the local wall clock, as every host's native
+    # trigger does, so both follow time zone and daylight saving changes.
+    instant = (now or datetime.now()).astimezone()
     accounting = _Accounting(
         firing.agent_id, uuid.uuid4().hex,
         budget_now=now.timestamp() if now is not None else None)
@@ -176,7 +170,7 @@ def _dispatch(
 ) -> Outcome:
     root = Path(firing.root).resolve()
     run_id = accounting.run_id
-    instant = (now or datetime.now(UTC)).astimezone(UTC)
+    instant = (now or datetime.now()).astimezone()
     timeout = _CLOCK_ACTIVATION_WAIT_SECONDS if firing.origin == "clock" else 0
     try:
         with handoff.gate(timeout=timeout, operation="dispatch", run_id=run_id,
@@ -209,15 +203,10 @@ def _dispatch(
             accounting.transcript_enabled = config.transcript
             if firing.origin == "clock":
                 schedules = tuple(parse_schedule(item) for item in config.schedules)
-                # The one place a clock decision reads a zone: the fixed
-                # offset stored at registration, never the current one (#609).
-                wall = (instant.astimezone(utc.zone(firing.utc_offset))
-                        if firing.utc_offset else instant.astimezone())
-                if not any(schedule.matches(wall) for schedule in schedules):
+                if not any(schedule.matches(instant) for schedule in schedules):
                     candidates = [planned for schedule in schedules
-                                  if (planned := schedule.previous(wall)) is not None]
-                    accounting.planned_at = (
-                        max(candidates).astimezone(UTC) if candidates else None)
+                                  if (planned := schedule.previous(instant)) is not None]
+                    accounting.planned_at = max(candidates) if candidates else None
                     accounting.planned_source = "previous-due-minute"
                     return _skip(run_id, "not-due")
                 accounting.planned_source = "due-minute"
@@ -782,8 +771,6 @@ def _failure(
 
 
 def _firing_attributes(firing: Firing) -> tuple[tuple[str, object], ...]:
-    if firing.origin == "clock" and firing.utc_offset:
-        return (("utc_offset", firing.utc_offset),)
     if firing.origin != "watch":
         return ()
     attributes: list[tuple[str, object]] = [

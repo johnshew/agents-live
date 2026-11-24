@@ -8,8 +8,7 @@ from threading import RLock
 from ..obs import timing
 
 from .diff import diff
-from .grammars import parse_schedule
-from . import handoff, utc, watcher
+from . import handoff, watcher
 from .protocols import HostAdapter
 from .values import Converged, Health, InstalledTrigger, Operation, ProcessRef, Subscription
 
@@ -41,7 +40,6 @@ class Plan:
     host: HostAdapter
     operations: tuple[Operation, ...]
     addresses: tuple[tuple[str, str, str], ...] = ()
-    utc_offsets: tuple[tuple[str, str], ...] = ()
 
 
 def plan(
@@ -58,14 +56,13 @@ def plan(
     from .hosts import system
 
     host = _host or current()
-    installed = tuple(host.trigger_store.list() if installed is None else installed)
-    subscriptions = with_utc_offsets(subscriptions, installed)
     rendered = tuple(host.render(item) for item in subscriptions)
     processes = tuple(host.supervisor.owned(role="watcher") if watchers is None else watchers)
     running = handoff.running_watchers(processes) if processes else set()
     watcher_health = {
         item.pid: "busy" if item.pid in running else host.supervisor.watcher_health(item)
         for item in processes}
+    installed = tuple(host.trigger_store.list() if installed is None else installed)
     keys = [item.key for item in processes if item.key]
     parents = system.process_parent_ids() if len(set(keys)) != len(keys) else {}
     try:
@@ -84,38 +81,7 @@ def plan(
         watcher_health=watcher_health,
     )), tuple((item.key, item.scope.removeprefix("repo:"),
                item.target.removeprefix("agent:"))
-              for item in (*installed, *rendered)),
-        tuple((item.key, item.utc_offset) for item in subscriptions
-              if item.utc_offset is not None))
-
-
-def is_clock(subscription: Subscription) -> bool:
-    """Whether *subscription* is an agent's clock wake (not boot or maintenance)."""
-    return (subscription.kind == "schedule" and subscription.target != "runtime"
-            and parse_schedule(subscription.trigger).canonical != "@reboot")
-
-
-def with_utc_offsets(
-    subscriptions: Sequence[Subscription],
-    installed: Sequence[InstalledTrigger],
-) -> tuple[Subscription, ...]:
-    """Give each clock wake the UTC offset its agent already keeps.
-
-    An agent's registered offset is kept, so a daylight saving change or a
-    time zone switch never re-registers or moves it; an agent with no
-    registered clock wake (new, restarted, or lost) takes the current
-    local offset (#609).
-    """
-    kept: dict[tuple[str, str], str] = {}
-    for item in sorted(installed, key=lambda entry: entry.key):
-        offset = utc.offset_in(item.rendered) if item.kind == "schedule" else None
-        if offset is not None and item.target:
-            kept.setdefault((item.scope, item.target), offset)
-    current_offset = utc.current_offset()
-    return tuple(
-        replace(item, utc_offset=kept.get((item.scope, item.target), current_offset))
-        if is_clock(item) else item
-        for item in subscriptions)
+              for item in (*installed, *rendered)))
 
 
 def _prepare(host: HostAdapter) -> Converged | None:
@@ -212,8 +178,7 @@ def commit(prepared: Plan, *, prepare: bool = True) -> Converged:
                 failed.append((operation, str(exc)))
             else:
                 done.append(operation)
-        return Converged(False, tuple(done), tuple(failed), Health(True),
-                         prepared.utc_offsets)
+        return Converged(False, tuple(done), tuple(failed), Health(True))
 
 
 def assess(result: Converged, *, _host: HostAdapter | None = None) -> Converged:
@@ -226,8 +191,7 @@ def assess(result: Converged, *, _host: HostAdapter | None = None) -> Converged:
             (*current_health.detail, *result.health.detail,
              "convergence operation failed"),
         )
-    return Converged(result.dry_run, result.done, result.failed, current_health,
-                     result.utc_offsets)
+    return Converged(result.dry_run, result.done, result.failed, current_health)
 
 
 def converge(
@@ -253,8 +217,7 @@ def converge(
             _host=host,
         )
         if dry_run:
-            return Converged(True, prepared.operations, (), _health(host),
-                             prepared.utc_offsets)
+            return Converged(True, prepared.operations, (), _health(host))
         return assess(commit(prepared, prepare=False), _host=host)
 
 

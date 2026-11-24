@@ -1,7 +1,7 @@
 ---
 title: Definition format
 description: Agent Skills layout and Agents Live execution metadata schema
-ms.date: 2026-11-23
+ms.date: 2026-11-24
 ms.topic: reference
 ---
 
@@ -76,15 +76,20 @@ Metadata keys and values must be strings, and every metadata value must be
 quoted. JSON is compact and uses stable key ordering. Metadata owned by other
 clients is preserved.
 
-A schedule is read in local time once, when the agent is started: start
-records the UTC offset in effect then, and from that point the schedule is a
-fixed UTC time. Daylight saving changes and time zone switches do not move it;
-stop and start the agent to re-anchor it to the current local time. Only an
-agent whose wake entry is lost or rebuilt takes the current offset again. The
-host scheduler wakes on a covering pattern (Task Scheduler with a UTC start
-boundary, crontab hourly at the schedule's minute), and each run decides
-whether the schedule is due at UTC plus the recorded offset. A wake that is
-not due ends quietly as `not-due`.
+A schedule runs on the machine's local wall clock on every platform. The
+crontab line is the schedule itself, Task Scheduler triggers use start
+boundaries with no zone suffix, and each run checks whether the schedule is
+due against the current local time, so the native trigger and the due check
+follow daylight saving and time zone changes together. Windows registers one
+daily trigger per scheduled hour, at most 48 per agent, and wakes daily for a
+schedule restricted by day, weekday or month; a wake that is not due ends
+quietly as `not-due`. On Linux and macOS, a crontab line that sets `CRON_TZ` or
+`TZ` prevents adding agent schedules until it is removed. A day or weekday
+field that starts with `*` is a wildcard, as in cron. A run due within the hour
+around a daylight saving or time zone change can be missed or run twice. On
+Windows, changing the machine into or out of a 45-minute time zone (such as
+Nepal or Chatham) can also affect the following hour, at most two hours once;
+no daylight saving rule does this.
 
 Pipeline retries start from read-only prepared inputs, not the previous attempt's
 mutable output. A retry that never writes a result does not inherit one. Earlier

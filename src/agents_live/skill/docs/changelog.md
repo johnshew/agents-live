@@ -1,7 +1,7 @@
 ---
 title: Changelog
 description: Reverse-chronological log of significant Agents Live changes
-ms.date: 2026-11-23
+ms.date: 2026-11-24
 ms.topic: reference
 ---
 
@@ -24,29 +24,31 @@ history is retained in the source repository.
   opens under the Filters button. The packaged dashboard readiness gate now
   waits for the repository selector to refresh after an unregister instead of
   sampling it once, which intermittently failed on every NiceGUI version.
-- fix: run clock schedules in UTC so the scheduler's time zone can no longer skip a due run. ([#609](https://github.com/johnshew/agents-live/issues/609))
-  Task Scheduler read an offset-less start boundary in a time zone it had
-  assumed earlier, so after a daylight saving or time zone change every firing
-  arrived off its slot and dispatch skipped it as `not-due`. Local time is now
-  read once, when an agent's wake entry is registered: the UTC offset in effect
-  then is stored on the entry as `--utc-offset=<offset>` (one argument, so a
-  negative offset parses on every supported Python), and from then on the schedule
-  is a fixed UTC time. Daylight saving changes and zone switches do not move
-  it; stop and start the agent to re-anchor it, and a lost or rebuilt entry
-  takes the current offset. Task Scheduler start boundaries are written in UTC
-  with an explicit `Z`, and the crontab line keeps only the schedule's minute
-  and wakes hourly (for example `12 3 * * *` becomes `12 * * * *`). Each wake
-  is due only when the schedule matches UTC plus the stored offset; other
-  wakes end quietly as `not-due`. Schedules restricted by day, weekday or
-  month now wake daily on Windows and are filtered at dispatch, because Task
-  Scheduler's weekly and monthly triggers choose days in its own zone. Existing
-  entries without a stored offset compare as changed and are registered again
-  once by automatic maintenance. `doctor` fails a registered trigger whose
-  boundary is not in UTC, schedule diagnostics show the stored offset with the
-  UTC boundary and its local time, and clock-fire queries follow each agent's
-  stored offset. A crontab host whose cron daemon switches between a whole-hour
-  and a half-hour offset after registration can miss wakes until the agent is
-  restarted.
+- fix: run clock schedules on the local wall clock on every platform, so the native trigger and the due check always agree. ([#609](https://github.com/johnshew/agents-live/issues/609))
+  Task Scheduler triggers were pinned to the UTC instant in effect at
+  registration while each run checked the schedule against local time, so
+  after a daylight saving or time zone change every firing arrived off its
+  slot and was skipped as `not-due`. Task Scheduler start boundaries are now
+  written with no zone suffix, which it evaluates on the computer's current
+  local clock, and the crontab line is the schedule itself. Each run checks
+  whether the schedule is due against current local time, the same clock both
+  schedulers use. Windows registers one daily trigger per scheduled hour, with
+  any repetition kept inside that hour, because Task Scheduler repeats on
+  elapsed time: a single all-day repetition kept counting through a clock
+  change and missed slots for the rest of the day. Schedules restricted by day,
+  weekday or month wake daily on Windows and are filtered by that due check,
+  the same rule every host uses. A crontab that sets `CRON_TZ` or `TZ` would
+  make cron and the due check read different clocks, so adding an agent clock
+  entry to it fails with an explanation and `doctor` reports the line. A day
+  or weekday field that starts with `*`, such as `*/1`, is a wildcard as in
+  cron, so `0 0 */1 * MON` runs on Mondays only. `doctor` fails a registered
+  trigger that is pinned to an instant, disabled, skips days or otherwise
+  differs from the computed one, and `status` schedule diagnostics no longer
+  report an exact match then. A run due within the hour around a daylight
+  saving or time zone change can be missed or run twice. On Windows, changing
+  the machine into or out of a 45-minute time zone (such as Nepal or Chatham)
+  can also miss or repeat runs in the following hour, at most two hours once;
+  no daylight saving rule does this.
 - docs: state in `--help` that `logs --sql` queries the `log` view and cannot be combined with filter flags such as `--since`, and that `status --json` reports the resolved runtime version, channel and commit.
   The generated command reference also now lists the `versions` command and
   the `run --timeout`, `run --no-retry`, `transcript --attempt`,

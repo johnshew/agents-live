@@ -363,7 +363,7 @@ def _observe_clocks(collected: Collected, result: runtime.Converged) -> None:
     try:
         clock.observe(collected.subscriptions, protected_scopes=collected.protected_scopes,
                       protected_targets=collected.protected_targets,
-                      complete=not result.failed, utc_offsets=result.utc_offsets)
+                      complete=not result.failed)
     except (OSError, ValueError, TypeError) as exc:
         admin.record("clock-observation", status="error", message=str(exc))
 
@@ -392,7 +392,7 @@ def _cleanup_legacy(
             False, health.liveness, health.budget_tripped,
             (*health.detail, "legacy trigger cleanup failed"))
     return runtime.Converged(
-        False, tuple(done), tuple(failed), health, converged.utc_offsets)
+        False, tuple(done), tuple(failed), health)
 
 
 def _discover(
