@@ -8447,7 +8447,6 @@ class TestWindowsTaskScheduling(unittest.TestCase):
     @unittest.skipUnless(sys.platform == "win32", "native Windows clock")
     def test_native_clock_launches_and_repeats(self) -> None:
         from agents_live.runtime.hosts.clock_readiness import check
-        from tests.host_safety import allow_native_runtime
 
         with allow_native_runtime():
             self.assertIn("clock launched at expected local minutes", check())
