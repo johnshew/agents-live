@@ -8562,6 +8562,33 @@ class TestWindowsTaskScheduling(unittest.TestCase):
                     moment = datetime(2026, 11, 24) + timedelta(minutes=minute)
                     self.assertEqual(int(due(moment)), native[minute], (expression, moment))
 
+    def test_over_limit_schedule_is_rejected_before_replacing_a_task(self) -> None:
+        from agents_live.runtime.hosts.windows import WindowsTriggerStore
+
+        expression = ("26,27,29,37,38,44,46,50,52,53,55,56,57 "
+                      "2,3,4,9,11,13,14,16,17,19,21,22 * * *")
+        subscription = lifecycle.maintenance_subscription()
+        with mock.patch("agents_live.runtime.hosts.windows.cli_executable_path",
+                        return_value=Path("C:/tools/agents-live.exe")):
+            host = WindowsHost()
+            rendered = host.render(subscription)
+            with self.assertRaisesRegex(task_scheduler.ScheduleNotTranslatable,
+                                        "49 triggers for " + re.escape(expression)):
+                host.render(dataclasses.replace(subscription, trigger=expression))
+        data = json.loads(rendered.rendered)
+        data["schedule"] = expression
+        rendered = dataclasses.replace(rendered, rendered=json.dumps(data))
+        with mock.patch.object(task_scheduler, "action_form", return_value=("command", "")), \
+             mock.patch.object(task_scheduler, "current_user_id", return_value="probe-user"), \
+             mock.patch.object(task_scheduler, "_run") as mutation:
+            with self.assertRaisesRegex(task_scheduler.ScheduleNotTranslatable, "the limit is 48"):
+                WindowsTriggerStore().install(rendered)
+            mutation.assert_not_called()
+        schedules = [f"{minute} 0 * * *" for minute in range(49)]
+        self.assertEqual(48, len(task_scheduler.trigger_signature(schedules[:48])))
+        with self.assertRaisesRegex(task_scheduler.ScheduleNotTranslatable, "49 triggers"):
+            task_scheduler.trigger_signature(schedules)
+
     def test_diagnostics_preserve_results_with_bounded_schedule_parsing(self) -> None:
         now = datetime(2026, 9, 8, 12, tzinfo=timezone(timedelta(hours=-4)))
         days = "day, weekday and month restrictions are checked at dispatch"

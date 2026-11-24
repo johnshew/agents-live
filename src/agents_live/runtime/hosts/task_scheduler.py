@@ -475,6 +475,10 @@ def _task_triggers(schedules: Sequence[str]) -> list[dict[str, object]]:
     for schedule in schedules:
         for trigger in translate(schedule):
             found.setdefault(_signature_of(trigger), trigger)
+    if len(found) > 48:
+        raise ScheduleNotTranslatable(
+            f"Windows Task Scheduler needs {len(found)} triggers for "
+            f"{', '.join(schedules)}; the limit is 48. Simplify minute and hour lists.")
     return list(found.values())
 
 

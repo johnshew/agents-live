@@ -45,6 +45,10 @@ anchor. The anchor is today's local midnight plus the run's first
 scheduled minute, converted to UTC and written with an explicit `Z` suffix.
 Task Scheduler can normalize that suffix to `+00:00` on export; readback treats
 both as the same UTC instant.
+Task Scheduler accepts at most 48 triggers per task. An unusually complex
+minute/hour expression that exceeds this limit is rejected with its schedule
+and required trigger count before replacing any existing task. Simplify the
+minute and hour lists rather than adding extra native wakes.
 Native experiments for #630 showed that unqualified boundaries executed on
 their UTC fields even when readback reported local next-run times. Future
 unqualified boundaries did not launch, and sparse midnight repetitions had

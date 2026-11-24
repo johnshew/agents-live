@@ -82,7 +82,10 @@ boundaries computed from the local anchor and converted to explicit UTC instants
 with a `Z` suffix. Each run checks whether the schedule is due against current
 local time. Windows registers one daily trigger for regular schedules, repeating
 at their natural interval; irregular lists use exact arithmetic runs rather than
-extra minute wakes. Automatic maintenance, normally every five minutes, notices
+extra minute wakes. Windows accepts at most 48 triggers per task; a complex
+expression that exceeds this limit is rejected before replacing the existing
+task, with an error naming the schedule. Simplify its minute and hour lists.
+Automatic maintenance, normally every five minutes, notices
 host UTC offset changes and re-registers clock tasks once. Windows wakes daily for a
 schedule restricted by day, weekday or month; a wake that is not due ends
 quietly as `not-due`. On Linux and macOS, a crontab line that sets `CRON_TZ` or
