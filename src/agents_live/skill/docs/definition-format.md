@@ -78,18 +78,21 @@ clients is preserved.
 
 A schedule runs on the machine's local wall clock on every platform. The
 crontab line is the schedule itself, Task Scheduler triggers use start
-boundaries with no zone suffix, and each run checks whether the schedule is
-due against the current local time, so the native trigger and the due check
-follow daylight saving and time zone changes together. Windows registers one
-daily trigger per scheduled hour, at most 48 per agent, and wakes daily for a
+boundaries computed from the local anchor and converted to explicit UTC instants
+with a `Z` suffix. Each run checks whether the schedule is due against current
+local time. Windows registers one daily trigger for regular schedules, repeating
+at their natural interval; irregular lists use exact arithmetic runs rather than
+extra minute wakes. Windows accepts at most 48 triggers per task; a complex
+expression that exceeds this limit is rejected before replacing the existing
+task, with an error naming the schedule. Simplify its minute and hour lists.
+Automatic maintenance, normally every five minutes, notices
+host UTC offset changes and re-registers clock tasks once. Windows wakes daily for a
 schedule restricted by day, weekday or month; a wake that is not due ends
 quietly as `not-due`. On Linux and macOS, a crontab line that sets `CRON_TZ` or
 `TZ` prevents adding agent schedules until it is removed. A day or weekday
 field that starts with `*` is a wildcard, as in cron. A run due within the hour
-around a daylight saving or time zone change can be missed or run twice. On
-Windows, changing the machine into or out of a 45-minute time zone (such as
-Nepal or Chatham) can also affect the following hour, at most two hours once;
-no daylight saving rule does this.
+around a daylight saving or time zone change can be missed or run twice. Windows
+can also miss runs until the next maintenance pass repairs the UTC anchors.
 
 Pipeline retries start from read-only prepared inputs, not the previous attempt's
 mutable output. A retry that never writes a result does not inherit one. Earlier

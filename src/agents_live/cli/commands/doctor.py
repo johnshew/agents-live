@@ -177,7 +177,7 @@ def _schedule_trigger_checks(
 ) -> list[dict[str, object]]:
     """Registered clock triggers that will not fire as their schedules ask.
 
-    A task whose boundary is pinned to a UTC offset keeps firing at the
+    A task registered before a host UTC offset change keeps firing at the
     old instant after a daylight saving or time zone change, and dispatch
     then skips every firing as not due without failing anything (#609).
     """
@@ -210,7 +210,7 @@ def _schedule_trigger_checks(
             })
     if compared and not checks:
         checks.append({"check": "schedule triggers", "ok": True,
-                       "detail": f"{compared} registered on local time"})
+                       "detail": f"{compared} registered for the current local UTC offset"})
     return checks
 
 

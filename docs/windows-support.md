@@ -1,7 +1,7 @@
 ---
 title: Native Windows Support
 description: Current native Windows host architecture, security model, and operational boundaries
-ms.date: 2026-09-03
+ms.date: 2026-11-24
 ms.topic: concept
 ---
 
@@ -36,21 +36,47 @@ One owned Task Scheduler artifact represents one runtime subscription. All
 tasks live under `\AgentsLive\` and carry a structured marker containing
 scope, subscription identity, fingerprint, and process role.
 
-Each cron expression compiles to one daily calendar trigger per scheduled
-hour, starting at that hour's first minute on the local wall clock, with any
-minute repetition kept inside the hour. Task Scheduler repeats on elapsed time,
-so keeping each repetition inside one hour limits a daylight saving or time
-zone change to the runs near it. The one exception is a manual change into
-or out of a 45-minute zone (such as Nepal or Chatham): the trigger that starts
-inside the change still repeats on elapsed time, so runs in the following hour
-can also be missed or repeated, at most two hours once. No daylight saving
-rule does this, and closing it would need per-minute wakes. A task holds at most 48 triggers, so a task
-whose schedules need more is refused. Day, weekday and month restrictions, and
-unevenly spaced minute lists, are covered by these daily wakes and
-dispatch-time dueness claims the minute. Dueness atomically claims the
+Regular cron expressions compile to one daily calendar trigger with repetition
+at the schedule's natural interval, such as 12 hours or 20 minutes. Irregular
+minute or hour lists are grouped into exact arithmetic runs, without extra
+minute wakes. Repetition ends at the last intended occurrence, because Windows
+includes the duration endpoint; a full-day window would overlap the next day's
+anchor. The anchor is today's local midnight plus the run's first
+scheduled minute, converted to UTC and written with an explicit `Z` suffix.
+Task Scheduler can normalize that suffix to `+00:00` on export; readback treats
+both as the same UTC instant.
+Task Scheduler accepts at most 48 triggers per task. An unusually complex
+minute/hour expression that exceeds this limit is rejected with its schedule
+and required trigger count before replacing any existing task. Simplify the
+minute and hour lists rather than adding extra native wakes.
+Native experiments for #630 showed that unqualified boundaries executed on
+their UTC fields even when readback reported local next-run times. Future
+unqualified boundaries did not launch, and sparse midnight repetitions had
+the wrong local phase.
+
+Registration records the host UTC offset in `RegistrationInfo/Date`. Automatic
+maintenance, normally every five minutes, compares that offset through the
+trigger fingerprint and re-registers clock tasks once after an offset change.
+Doctor reports old offsets and unsupported boundary forms as drift. Definitions
+store no offset; dispatch checks the current local clock, just as on Linux.
+Runs near a time change can still be missed or repeated until maintenance repairs
+the anchors, in addition to the transition hour.
+
+Day, weekday and month restrictions are checked at dispatch. Dueness atomically claims the
 minute, so a covering trigger cannot run the same logical firing twice.
 `@reboot` maps to a logon trigger because tasks run in the developer's
 interactive session.
+
+Windows packaged readiness registers isolated `PT9M` and `PT12H` probe tasks.
+The first anchor is in the future; the second is yesterday at an upcoming local
+minute, so its next daily cycle is observed without waiting a day. Setup finishes
+before choosing times that leave at least one full minute for registration. It requires timestamp
+actions within 30 seconds of each expected local minute, waiting until 45 seconds
+after the last anchor. It watches the full 30-second launch window to reject
+duplicate launches. Registration and observed launch times are reported per task.
+It uses the candidate interpreter and renderer,
+never the live task folder, and deletes the probe tasks and folder in `finally`.
+This gate checks actual launches, not just XML or next-run estimates.
 
 Task actions pin the installed CLI path and an explicit repository. They do
 not depend on the Task Scheduler service's PATH or working directory.

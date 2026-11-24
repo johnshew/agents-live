@@ -13,6 +13,19 @@ history is retained in the source repository.
 
 ### 6.9.5 (Unreleased)
 
+- fix: restore Windows clock tasks that registered successfully but never launched. ([#630](https://github.com/johnshew/agents-live/issues/630))
+  Convert today's first local scheduled minute to an explicit UTC `Z` boundary
+  and repeat at the schedule's natural interval. Regular schedules use one daily
+  trigger; irregular lists use exact arithmetic runs without extra minute wakes.
+  Repetition ends at the last intended occurrence, avoiding duplicate launches
+  at the next daily anchor. Expressions requiring more than 48 triggers are
+  rejected with a clear schedule error before replacing any existing task.
+  Record the host UTC offset at registration so automatic maintenance re-registers
+  clock tasks once after an offset change. Doctor reports stale offsets as drift.
+  Windows packaged readiness now requires actual timestamp actions from isolated
+  `PT9M` and `PT12H` triggers, with enough registration lead time and a next-day
+  anchor to reject duplicate launches, not just plausible XML or next-run estimates.
+  It reports registration and launch times and deletes its probe tasks and folder.
 - fix: keep log queries and the dashboard Filters menu working with current DuckDB and NiceGUI releases.
   DuckDB 2.0.1 requires the `tzdata` package to resolve the `UTC` session time
   zone on Windows, so `agents-live logs` failed there and the dashboard's
@@ -25,30 +38,21 @@ history is retained in the source repository.
   waits for the repository selector to refresh after an unregister instead of
   sampling it once, which intermittently failed on every NiceGUI version.
 - fix: run clock schedules on the local wall clock on every platform, so the native trigger and the due check always agree. ([#609](https://github.com/johnshew/agents-live/issues/609))
-  Task Scheduler triggers were pinned to the UTC instant in effect at
-  registration while each run checked the schedule against local time, so
-  after a daylight saving or time zone change every firing arrived off its
-  slot and was skipped as `not-due`. Task Scheduler start boundaries are now
-  written with no zone suffix, which it evaluates on the computer's current
-  local clock, and the crontab line is the schedule itself. Each run checks
-  whether the schedule is due against current local time, the same clock both
-  schedulers use. Windows registers one daily trigger per scheduled hour, with
-  any repetition kept inside that hour, because Task Scheduler repeats on
-  elapsed time: a single all-day repetition kept counting through a clock
-  change and missed slots for the rest of the day. Schedules restricted by day,
+  The crontab line is the schedule itself, and each run checks whether the
+  schedule is due against current local time. Windows converts local schedule
+  anchors to explicit UTC boundaries and maintenance repairs them after a host
+  offset change, as described in #630 above. Schedules restricted by day,
   weekday or month wake daily on Windows and are filtered by that due check,
   the same rule every host uses. A crontab that sets `CRON_TZ` or `TZ` would
   make cron and the due check read different clocks, so adding an agent clock
   entry to it fails with an explanation and `doctor` reports the line. A day
   or weekday field that starts with `*`, such as `*/1`, is a wildcard as in
   cron, so `0 0 */1 * MON` runs on Mondays only. `doctor` fails a registered
-  trigger that is pinned to an instant, disabled, skips days or otherwise
-  differs from the computed one, and `status` schedule diagnostics no longer
+  trigger that has a stale registration offset, is disabled, skips days or
+  otherwise differs from the computed one, and `status` schedule diagnostics no longer
   report an exact match then. A run due within the hour around a daylight
-  saving or time zone change can be missed or run twice. On Windows, changing
-  the machine into or out of a 45-minute time zone (such as Nepal or Chatham)
-  can also miss or repeat runs in the following hour, at most two hours once;
-  no daylight saving rule does this.
+  saving or time zone change can be missed or run twice. Windows can also miss
+  runs until the next maintenance pass repairs the anchors.
 - docs: state in `--help` that `logs --sql` queries the `log` view and cannot be combined with filter flags such as `--since`, and that `status --json` reports the resolved runtime version, channel and commit.
   The generated command reference also now lists the `versions` command and
   the `run --timeout`, `run --no-retry`, `transcript --attempt`,

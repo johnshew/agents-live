@@ -123,6 +123,18 @@ the platform checks; source evidence never replaces them. Do not invoke this
 profile as a stable promotion or publication prerequisite.
 Use `--plan` to inspect a profile without running checks.
 
+On Windows, packaged dashboard readiness also runs the candidate's native clock
+check before starting the server. It registers isolated `PT9M` and `PT12H` triggers
+with expected local launches at least one full minute ahead. The second trigger
+starts yesterday at its upcoming minute to exercise the next daily cycle. It
+verifies timestamp actions and UTC/offset readback, watches the full 30-second
+launch window for duplicates, then deletes the probe tasks and folder. Launches must occur
+within 30 seconds of their expected minutes; the deadline follows the last anchor
+by 45 seconds. Registration and observed launch times are reported for each task.
+A schedule that never launches fails readiness in under four minutes. The source seam suite runs
+the same check on Windows and skips it elsewhere; neither check touches the live
+task folder.
+
 Receipts live under the common Git directory, outside the exported tree. They
 record command arguments, exit codes, durations, commit and source digest,
 interpreter, installed package versions, platform, and a digest of environment
