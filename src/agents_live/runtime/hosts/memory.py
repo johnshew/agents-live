@@ -7,7 +7,6 @@ import time
 from collections.abc import Sequence
 from pathlib import Path
 
-from .. import utc
 from ..values import (
     ChildResult,
     Health,
@@ -105,17 +104,13 @@ class MemoryHost:
             f"{subscription.scope}\0{subscription.target}\0"
             f"{subscription.kind}\0{subscription.trigger}".encode()
         ).hexdigest()
-        document: dict[str, str] = {"target": subscription.target}
-        if subscription.utc_offset is not None:
-            fingerprint += ":utc" + subscription.utc_offset
-            document["utc_offset"] = utc.argument(subscription.utc_offset)
         watcher_argv = (
             "agents-live", "internal", "watch-loop", subscription.target,
         ) if subscription.kind == "watch" else ()
         return RenderedSubscription(
             subscription.key, subscription.scope, subscription.kind,
             fingerprint,
-            json.dumps(document, sort_keys=True),
+            json.dumps({"target": subscription.target}, sort_keys=True),
             watcher_argv,
             subscription.target,
         )

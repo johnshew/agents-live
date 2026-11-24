@@ -38,17 +38,6 @@ class WatchSyntaxError(ValueError):
 class Schedule:
     canonical: str
 
-    @property
-    def expression(self) -> str:
-        """The five cron fields, with any ``@`` keyword other than ``@reboot`` expanded."""
-        return {
-            "@yearly": "0 0 1 1 *",
-            "@monthly": "0 0 1 * *",
-            "@weekly": "0 0 * * 0",
-            "@daily": "0 0 * * *",
-            "@hourly": "0 * * * *",
-        }.get(self.canonical, self.canonical)
-
     def matches(self, moment: datetime) -> bool:
         expression = {
             "@yearly": "0 0 1 1 *",
@@ -68,7 +57,7 @@ class Schedule:
         day_matches = moment.day in values[2]
         weekday_matches = ((moment.weekday() + 1) % 7) in {
             0 if item == 7 else item for item in values[4]}
-        if fields[2] != "*" and fields[4] != "*":
+        if _both_days_restricted(fields):
             return day_matches or weekday_matches
         return day_matches and weekday_matches
 
@@ -91,7 +80,7 @@ class Schedule:
             weekday_matches = ((date.weekday() + 1) % 7) in {
                 0 if item == 7 else item for item in values[4]}
             due_day = (day_matches or weekday_matches
-                       if fields[2] != "*" and fields[4] != "*"
+                       if _both_days_restricted(fields)
                        else day_matches and weekday_matches)
             if date.month in values[3] and due_day:
                 for hour in sorted(values[1], reverse=True):
@@ -104,7 +93,11 @@ class Schedule:
 
     def slots(self, start: datetime, end: datetime, *, zone=None):
         """Enumerate calendar candidates in UTC, including both DST folds."""
-        expression = self.expression
+        expression = {
+            "@yearly": "0 0 1 1 *", "@monthly": "0 0 1 * *",
+            "@weekly": "0 0 * * 0", "@daily": "0 0 * * *",
+            "@hourly": "0 * * * *",
+        }.get(self.canonical, self.canonical)
         if expression == "@reboot":
             return
         values = _schedule_values(expression)
@@ -125,6 +118,12 @@ class Schedule:
                 if wall.hour in values[1] and self.matches(wall):
                     yield candidate
             hour += timedelta(hours=1)
+
+
+def _both_days_restricted(fields: list[str]) -> bool:
+    """Cron's rule: a day field that starts with ``*`` (``*/1`` too) is a
+    wildcard, so day and weekday are ORed only when neither does."""
+    return not fields[2].startswith("*") and not fields[4].startswith("*")
 
 
 @lru_cache(maxsize=256)

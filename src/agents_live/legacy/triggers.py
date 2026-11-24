@@ -159,8 +159,9 @@ def _schedule_matcher(expression: str) -> Callable[[datetime], bool]:
     text = _SPECIAL_SCHEDULES.get(expression.strip().lower(), expression.strip())
     fields = text.split()
     minutes, hours, days, months, weekdays = schedule_fields(text)
-    day_restricted = fields[2] != "*"
-    weekday_restricted = fields[4] != "*"
+    # A field starting with ``*`` (``*/1`` too) is a wildcard, as in cron.
+    day_restricted = not fields[2].startswith("*")
+    weekday_restricted = not fields[4].startswith("*")
 
     def matches(moment: datetime) -> bool:
         if moment.minute not in minutes or moment.hour not in hours:

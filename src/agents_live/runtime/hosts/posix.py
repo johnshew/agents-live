@@ -2,12 +2,13 @@
 from __future__ import annotations
 
 import os
+import re
 import shlex
 from collections.abc import Sequence
 from pathlib import Path
 
 from ...legacy import artifacts as legacy_artifacts
-from .. import artifacts, utc
+from .. import artifacts
 from ..grammars import parse_schedule, parse_watch
 from ..values import Health, InstalledTrigger, RenderedSubscription, Subscription
 from .processes import LocalChildRunner, LocalProcesses
@@ -21,6 +22,10 @@ class PosixTriggerStore:
             lines = crontasks.lines()
             if lines is None:
                 raise RuntimeError("crontab is unreadable")
+            conflict = zone_conflict(lines)
+            if (conflict and rendered.kind == "schedule" and rendered.target != "runtime"
+                    and not rendered.rendered.startswith("@reboot")):
+                raise RuntimeError(conflict)
             kept = [line for line in lines if _key(line) != rendered.key]
             crontasks.write([*kept, rendered.rendered])
 
@@ -39,14 +44,12 @@ class PosixTriggerStore:
         for line in lines:
             metadata = artifacts.from_rendered(line)
             if metadata is not None:
-                offset = utc.offset_in(line)
                 found.append(InstalledTrigger(
                     metadata.id,
                     metadata.scope,
                     _kind(line),
                     artifacts.PREFIX + metadata.id + (
-                        ":supervised" if "watch-supervise" in shlex.split(line) else "")
-                    + (_utc_suffix(offset) if offset else ""),
+                        ":supervised" if "watch-supervise" in shlex.split(line) else ""),
                     line,
                     metadata.target,
                 ))
@@ -117,14 +120,6 @@ class PosixHost:
                     "agents-live", "--repo", root, "run",
                     "--metadata", marker, "--name", target, "--quiet",
                 ]
-            if subscription.utc_offset is not None:
-                # The crontab wakes every hour at the schedule's minute and
-                # dispatch decides at UTC plus the stored offset, so the
-                # cron daemon's own time zone never moves a firing (#609).
-                minute = parse_schedule(subscription.trigger).expression.split()[0]
-                trigger = f"{minute} * * * *"
-                argv.append(utc.argument(subscription.utc_offset))
-                fingerprint += _utc_suffix(subscription.utc_offset)
             watcher_argv: tuple[str, ...] = ()
         else:
             watch = parse_watch(subscription.trigger)
@@ -162,11 +157,32 @@ class PosixHost:
         crontasks.delete(root, name, kind=crontasks.WATCH)
 
     def health(self) -> Health:
-        readable = crontasks.lines() is not None
-        return Health(readable, detail=() if readable else ("crontab is unreadable",))
+        lines = crontasks.lines()
+        if lines is None:
+            return Health(False, detail=("crontab is unreadable",))
+        conflict = zone_conflict(lines)
+        return Health(conflict is None, detail=(conflict,) if conflict else ())
 
     def change_source(self, roots: Sequence[str]):
         return watchsource.PosixEventSource([Path(item) for item in roots], cwd=Path.cwd())
+
+
+# Cron reads the lines after a CRON_TZ assignment in that zone and passes TZ
+# to the commands it starts, while the due check reads the machine's local
+# clock, so either assignment would make every firing look not due. Cron
+# also accepts the name in single or double quotes.
+_ZONE_ASSIGNMENT = re.compile(r"""\s*(["']?)(CRON_TZ|TZ)\1\s*=""")
+
+
+def zone_conflict(lines: Sequence[str]) -> str | None:
+    """Why clock lines cannot be added to this crontab, or None."""
+    names = sorted({match.group(2) for line in lines
+                    if (match := _ZONE_ASSIGNMENT.match(line))})
+    if not names:
+        return None
+    return (f"the crontab sets {' and '.join(names)}, so cron would not run "
+            "agent schedules on the machine's local clock; remove that line "
+            "with 'crontab -e' or set the machine's time zone instead")
 
 
 def _address(subscription: Subscription) -> tuple[str, str]:
@@ -175,11 +191,6 @@ def _address(subscription: Subscription) -> tuple[str, str]:
     if not subscription.target.startswith("agent:"):
         raise ValueError(f"POSIX subscription has invalid target: {subscription.target}")
     return subscription.scope.removeprefix("repo:"), subscription.target.removeprefix("agent:")
-
-
-def _utc_suffix(offset: str) -> str:
-    """Fingerprint part that makes an entry without a stored offset re-register."""
-    return f":utc{offset}"
 
 
 def _key(line: str) -> str | None:
