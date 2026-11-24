@@ -41,6 +41,8 @@ at the schedule's natural interval, such as 12 hours or 20 minutes. Irregular
 minute or hour lists are grouped into exact arithmetic runs, without extra
 minute wakes. The anchor is today's local midnight plus the run's first
 scheduled minute, converted to UTC and written with an explicit `Z` suffix.
+Task Scheduler can normalize that suffix to `+00:00` on export; readback treats
+both as the same UTC instant.
 Native experiments for #630 showed that unqualified boundaries executed on
 their UTC fields even when readback reported local next-run times. Future
 unqualified boundaries did not launch, and sparse midnight repetitions had

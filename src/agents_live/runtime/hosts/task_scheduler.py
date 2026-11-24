@@ -919,7 +919,7 @@ UTC = "utc"
 
 
 def boundary_form(document: str) -> str | None:
-    """UTC for explicit Z boundaries, or the unsupported form read back."""
+    """UTC for explicit zero-offset boundaries, including normalized +00:00."""
     form = None
     for element in _trigger_elements(document) or []:
         boundary = element.findtext(f"{{{_NS}}}StartBoundary")
@@ -929,7 +929,7 @@ def boundary_form(document: str) -> str | None:
             start = datetime.fromisoformat(boundary.strip())
         except ValueError:
             return PINNED
-        current = UTC if boundary.strip().endswith("Z") else (
+        current = UTC if start.utcoffset() == timedelta(0) else (
             PINNED if start.tzinfo is not None else LOCAL)
         if form is not None and form != current:
             return PINNED
@@ -979,7 +979,7 @@ def trigger_drift(document: str, schedules: Sequence[str], *,
                   zone: tzinfo | None = None) -> str | None:
     """Why a registered definition will not fire as *schedules* ask, or None."""
     if boundary_form(document) != UTC:
-        return "start boundary must be an explicit UTC instant with a Z suffix"
+        return "start boundary must be an explicit UTC instant"
     task = ET.fromstring(document.split("?>", 1)[-1].strip())
     date = task.findtext(f"{{{_NS}}}RegistrationInfo/{{{_NS}}}Date", default="")
     try:

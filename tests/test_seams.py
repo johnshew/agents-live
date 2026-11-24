@@ -8565,6 +8565,11 @@ class TestWindowsTaskScheduling(unittest.TestCase):
                         for item in root.findall("t:Triggers/*", namespace)])
                     self.assertEqual("true", root.findtext(
                         "t:Settings/t:StartWhenAvailable", namespaces=namespace))
+                    normalized = document.replace("Z</StartBoundary>", "+00:00</StartBoundary>")
+                    zone = datetime.fromisoformat(timestamp + offset).tzinfo
+                    self.assertEqual(
+                        task_scheduler.registered_trigger_identity(document, zone=zone),
+                        task_scheduler.registered_trigger_identity(normalized, zone=zone))
 
     def test_daily_boundary_is_local_midnight_read_back_as_written(self) -> None:
         """A daily cron registers local midnight and reads back as midnight (#397, #609)."""
