@@ -17,11 +17,15 @@ history is retained in the source repository.
   Convert today's first local scheduled minute to an explicit UTC `Z` boundary
   and repeat at the schedule's natural interval. Regular schedules use one daily
   trigger; irregular lists use exact arithmetic runs without extra minute wakes.
+  Repetition ends at the last intended occurrence, avoiding duplicate launches
+  at the next daily anchor. Expressions requiring more than 48 triggers are
+  rejected with a clear schedule error before replacing any existing task.
   Record the host UTC offset at registration so automatic maintenance re-registers
   clock tasks once after an offset change. Doctor reports stale offsets as drift.
-  Windows packaged readiness now requires actual timestamp actions from two
-  isolated `PT9M` triggers anchored one and two local minutes ahead, not just
-  plausible XML or next-run estimates. It deletes its probe tasks and folder.
+  Windows packaged readiness now requires actual timestamp actions from isolated
+  `PT9M` and `PT12H` triggers, with enough registration lead time and a next-day
+  anchor to reject duplicate launches, not just plausible XML or next-run estimates.
+  It reports registration and launch times and deletes its probe tasks and folder.
 - fix: keep log queries and the dashboard Filters menu working with current DuckDB and NiceGUI releases.
   DuckDB 2.0.1 requires the `tzdata` package to resolve the `UTC` session time
   zone on Windows, so `agents-live logs` failed there and the dashboard's
