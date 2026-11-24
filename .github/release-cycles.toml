@@ -202,9 +202,9 @@ evidence = "Prepared and consumed from main on 2026-10-08; packaged readiness an
 
 [cycles."6.9.5"]
 branch = "main"
-next_rc = "6.9.5rc5"
-selected_rc = "6.9.5rc3"
-recommendation = "6.9.5rc3 is selected locally after 6.9.5rc4 was rolled back because no Windows scheduled task launched under it (#630). Prepare 6.9.5rc5 from main with the local wall-clock schedule design (PR #627) and its Windows trigger fix (PR #631), run isolated acceptance and activate locally with dashboards restored. After activation, runtime maintenance and the life clock agents must be seen launching at their due minutes; roll back to RC3 if they do not. #539 still needs installed operational evidence. If RC5 runs cleanly, the developer decides whether to approve this exact RC for 6.9.5 publication. #588 stays on hold; #604 and #613 are deferred to the next cycle. Changed package source must use RC6."
+next_rc = "6.9.5rc6"
+selected_rc = "6.9.5rc5"
+recommendation = "6.9.5rc5 is selected locally with the local wall-clock schedule design (PR #627) and its Windows trigger fix (PR #631); runtime maintenance and a life clock agent were observed launching on time after activation. Let it run on the live host: scheduled agents must keep firing at their local times, and #539 still needs installed operational evidence. If it runs cleanly, the developer decides whether to approve this exact RC for 6.9.5 publication. #588 stays on hold; #604 and #613 are deferred to the next cycle. Changed package source must use RC6."
 
 [cycles."6.9.5".approval]
 decision = "testing"
@@ -266,3 +266,12 @@ source_commit = "6a9a261b068d1e5523e700c28d98bfbb23793d86"
 wheel_sha256 = "0c337784280e4811c8da79aecdca38455364beddcaa0135f0e4fc30ed6112c8b"
 sdist_sha256 = "3f2e70d753f18ef20733622432841b36d86c8e25c64f6fc8aa047cdfda2361a5"
 evidence = "Prepared and consumed from main with the local wall-clock schedule design (#627). Isolated hello-world acceptance passed through copilot. local-deploy activated it from 6.9.5rc3 on 2026-11-24 at 09:59 UTC and restored the life dashboard; doctor --all-repos exited 0 and reported the schedule triggers registered on local time. No Windows scheduled task launched afterwards: runtime maintenance and the life clock agents missed their due minutes and every task reported result 267011, because Task Scheduler ran the unqualified start boundaries on their UTC fields (#630). It was rolled back to 6.9.5rc3 at about 10:10 UTC, after which maintenance fired again, and the life dashboard was restarted on RC3. Doctor and acceptance did not detect the defect. Not acceptable for publication; changed source must use RC5."
+[cycles."6.9.5".history."6.9.5rc5"]
+status = "prepared"
+kind = "numbered-rc"
+artifact_version = "6.9.5rc5"
+commit = "a08048dd5e068ebe802bcdbfa5f55143cd0b5dbe"
+source_commit = "8c90b97fd499398bcc708f0890eb304137927e1b"
+wheel_sha256 = "b2941b7902675fa2332d1284dbbf1e4f054a5f3377ec09d56c4d05e36cfc39ac"
+sdist_sha256 = "cffdb4f16a24e0d1932a648c47944b499850e3e5fbedbbeba71cc0c8da3ee5f7"
+evidence = "Prepared and consumed on 2026-11-24 from main with the Windows trigger fix (#631). Every preparation gate passed, including packaged dashboard readiness with the native clock check, whose probe tasks launched at their expected minutes. Isolated hello-world acceptance passed through copilot. local-deploy activated it from 6.9.5rc3 at 12:26 UTC, reused the prepared bytes and restored the life dashboard. Afterwards runtime maintenance launched at its next two 5-minute marks and life-update at its next due minute, each within 2 seconds and with result 0; doctor --all-repos exited 0 with 6 triggers registered for the current UTC offset, and the dashboard answers /api/agents. This history is not publication approval; changed source must use RC6."
