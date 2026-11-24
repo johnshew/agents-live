@@ -14026,6 +14026,78 @@ class TestSteeringHook(unittest.TestCase):
             self.assertIn(mode, self.hook["MODES"])
 
 
+class TestRunHidden(unittest.TestCase):
+    """The windowless launcher relays output and exit codes, or detaches."""
+
+    SCRIPT = REPOSITORY / "tools" / "run-hidden.py"
+
+    def setUp(self) -> None:
+        self.directory = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.directory, ignore_errors=True)
+
+    def launch(self, *arguments: str, code: str) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [sys.executable, str(self.SCRIPT), *arguments, "--", sys.executable, "-c", code],
+            capture_output=True, text=True, timeout=60, check=False)
+
+    def test_relays_output_and_exit_code(self) -> None:
+        result = self.launch(code="import sys; print('out'); print('err', file=sys.stderr); sys.exit(3)")
+        self.assertEqual(result.returncode, 3)
+        self.assertEqual(result.stdout.strip(), "out")
+        self.assertEqual(result.stderr.strip(), "err")
+
+    def test_log_appends_combined_output(self) -> None:
+        log = self.directory / "run.log"
+        log.write_text("before\n", encoding="utf-8")
+        result = self.launch("--log", str(log),
+                             code="import sys; print('out', flush=True); print('err', file=sys.stderr); sys.exit(4)")
+        self.assertEqual((result.returncode, result.stdout), (4, ""))
+        self.assertEqual(log.read_text(encoding="utf-8").split(), ["before", "out", "err"])
+
+    def test_detach_prints_pid_and_returns_before_the_command_ends(self) -> None:
+        log = self.directory / "detached.log"
+        release = self.directory / "release"
+        started = time.monotonic()
+        result = self.launch(
+            "--detach", "--log", str(log),
+            code=("import pathlib, time\n"
+                  f"release = pathlib.Path({str(release)!r})\n"
+                  "deadline = time.monotonic() + 30\n"
+                  "while not release.exists() and time.monotonic() < deadline: time.sleep(0.05)\n"
+                  "print('done', flush=True)"))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(result.stdout.strip().isdigit(), result.stdout)
+        self.assertLess(time.monotonic() - started, 25)
+        self.assertFalse(log.exists() and "done" in log.read_text(encoding="utf-8"))
+        release.touch()
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            if log.exists() and "done" in log.read_text(encoding="utf-8"):
+                break
+            time.sleep(0.05)
+        self.assertIn("done", log.read_text(encoding="utf-8"))
+
+    def test_missing_command_is_a_usage_error_and_unknown_program_exits_127(self) -> None:
+        missing = subprocess.run([sys.executable, str(self.SCRIPT), "--"],
+                                 capture_output=True, text=True, timeout=60, check=False)
+        self.assertEqual(missing.returncode, 2)
+        self.assertIn("no command given", missing.stderr)
+        unknown = subprocess.run(
+            [sys.executable, str(self.SCRIPT), "--", str(self.directory / "absent-program")],
+            capture_output=True, text=True, timeout=60, check=False)
+        self.assertEqual(unknown.returncode, 127)
+        self.assertIn("cannot start", unknown.stderr)
+
+    def test_creation_flags_hide_on_windows_and_pass_through_elsewhere(self) -> None:
+        flags = runpy.run_path(str(self.SCRIPT))["creation_flags"]
+        with mock.patch.object(sys, "platform", "linux"):
+            self.assertEqual(flags(True), 0)
+        if sys.platform == "win32":
+            self.assertEqual(flags(False), subprocess.CREATE_NO_WINDOW)
+            self.assertEqual(flags(True),
+                             subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP)
+
+
 class TestStartStopRecordAdminEvents(TempRepository):
     """Start and stop leave one admin event per affected agent (#591)."""
 

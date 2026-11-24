@@ -194,14 +194,37 @@ or app child sessions. They add no commit, merge, release or runtime authority.
   6. Keep slices under about 45 minutes; when one merges, start the next in a
      fresh session from current `origin/main` rather than reusing the old one.
   A long command with no reasoning needed (a build or gate run) can instead
-  run as a detached hidden process (the agent shell's async detached mode),
-  writing its result to a gitignored file. Use in-session task subagents only
-  for short, bounded checks whose verdict is all that matters.
+  run as a detached hidden process through
+  `uv run --script tools/run-hidden.py --detach --log <file> -- <command>`,
+  with the log in a gitignored location. It prints the process ID and returns
+  at once; on Windows neither the command nor anything it starts opens a
+  window. Without `--detach` it waits and relays the output and exit code.
+  Use in-session task subagents only for short, bounded checks whose verdict
+  is all that matters.
+- **Restart a hung coordinator; do not retry it.** If every tool call in a
+  coordinator session hangs, including trivial reads, searches and session
+  creation, the session itself is the fault. Stop retrying, record the state
+  you can, and tell the developer to start a fresh coordinator session. The new
+  session resumes from the prior session's record (its handoff, open PRs,
+  worktrees and the check's state), not from a rebuilt plan.
+- **When blocked, ask and keep moving.** A coordinator or worker that is
+  blocked does two things at once. It posts an ASK on the cross-team
+  coordination issue, naming its role and asking the other coordinators for
+  unblocking strategies, with no private content. Meanwhile it switches to
+  other authorized, unblocked work so progress continues. It never sits idle
+  waiting for an answer.
 - **Run the heartbeat as its own worker.** Use a same-session automation where
   the harness offers one. Otherwise start a `Heartbeat` child session whose
-  only job is to run `uv run --script tools/coordinator-check.py` every 15 to
-  20 minutes and message the coordinator with its output, only when it prints
-  something. It never acts; to change what it checks, change the script.
+  only job is to run `uv run --script tools/coordinator-check.py` about every
+  10 minutes and also read the cross-team coordination issue for new posts
+  from other coordinators. It messages the coordinator only when the check
+  prints something or the issue has a new post. For the issue read it keeps a
+  high-water mark taken from the newest comment it actually saw, not from the
+  clock, and treats a comment as new when either its created or its updated
+  time is past that mark. It excludes only its own coordinator's posts, and it
+  flags a coordinator posting for the first time and any ask addressed to all
+  coordinators. It never acts and never posts to the issue; to change what it
+  checks, change the script.
   Retire it when the goals are met.
 - **Name the workspace in every brief.** State the exact worktree and tested
   head the delegate may read, edit or test, and the excluded locations (for
@@ -542,3 +565,72 @@ differently.
 #### Follow-up
 Fold into Commit hygiene at the next consolidation of this document.
 <!-- /glp-update:v1 id=7a98e19a-07e1-45d3-b1e8-4d92ae0f54c0 -->
+
+<!-- glp-update:v1 id=d121e4f7-57ac-40d1-bfc7-deb5e459d511 -->
+<a id="glp-d121e4f7-57ac-40d1-bfc7-deb5e459d511"></a>
+### GLP Update: Windowless launcher, fresh sessions for hung coordinators and progress when blocked
+
+- Update-ID: d121e4f7-57ac-40d1-bfc7-deb5e459d511
+- Recorded-UTC: 2026-11-23T19:53:51Z
+- Kind: addition
+- Topics: orchestration, detached processes, hidden windows, coordinator recovery, blocked work, heartbeat
+- Workstream: worker-launch practices adoption
+- Target: .agents/development.md, Orchestrating delegates and child sessions; new tools/run-hidden.py; compared origin/main 43e70b5
+- Source-Session: Copilot app worker session 2026-11-23 (harness history)
+- Evidence-Basis: mixed
+- Application: applied
+- Consolidation: pending
+
+#### Change
+Long commands that need no reasoning run through `tools/run-hidden.py`, which
+starts a command with no visible window on Windows, optionally detached with a
+printed process ID and a log file, and relays output and exit code otherwise.
+When every tool call in a coordinator session hangs, the coordinator stops
+retrying and the developer starts a fresh coordinator session that resumes
+from the prior session's record. A coordinator or worker that is blocked asks
+the other coordinators for unblocking strategies on the cross-team coordination
+issue and meanwhile switches to other authorized, unblocked work. A heartbeat
+worker runs about every 10 minutes instead of every 15 to 20, and also reads
+the cross-team coordination issue, reporting only new posts. Its issue read
+tracks the newest comment it saw (created or updated time), excludes only its
+own coordinator's posts and flags new coordinators and asks to all
+coordinators.
+
+#### Evidence
+- User direction, 2026-11-23: the developer chose to adopt these two
+  worker-launch practices from another repository the developer maintains.
+  Only the launcher's process-creation behavior and the recovery rule were
+  adopted; that repository's process registry and other specific content were
+  not copied.
+- Observation, 2026-11-23: a coordinator session's tool calls, including
+  session creation and trivial searches, hung for hours. A fresh coordinator
+  session started both pending workers on the first try.
+- User direction, 2026-11-23, added to the same change: "if you gets blocked
+  you can talk to the other about good strategies to get unblocked and if you
+  do get blocked work on other works so you keep making progress".
+- User direction, 2026-11-23: "every 10 minutes might be better", confirmed
+  for all coordinators, with the heartbeat also reading the cross-team
+  coordination issue for new posts.
+- Observation, 2026-11-24: a heartbeat reported no new posts on the
+  coordination issue while six posts from other coordinators, including two
+  asks addressed to all coordinators, were unread. The developer directed the
+  high-water mark, created-or-updated check, own-posts-only exclusion and
+  flagging rules.
+
+#### Previous Knowledge
+The guide pointed long no-reasoning commands at the agent shell's async
+detached mode, which does not control console windows for the command's own
+children, and had no rule for a coordinator session whose tool calls all hang.
+The "Never stall a child" rule covered a supervisor answering its children, but
+not what a blocked coordinator or worker does with its own time.
+
+#### Verification and Limits
+Focused behavior tests cover output and exit-code relay, log appending,
+detached start with a printed process ID, usage and start errors, and the
+Windows creation flags. The hung-session rule rests on one observation; the
+cause of the hang was not diagnosed. The blocked-work rule is developer
+direction and has not yet been exercised here.
+
+#### Follow-up
+Fold into the orchestration guidance at the next consolidation of this document.
+<!-- /glp-update:v1 id=d121e4f7-57ac-40d1-bfc7-deb5e459d511 -->
