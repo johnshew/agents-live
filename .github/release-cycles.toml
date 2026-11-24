@@ -202,9 +202,9 @@ evidence = "Prepared and consumed from main on 2026-10-08; packaged readiness an
 
 [cycles."6.9.5"]
 branch = "main"
-next_rc = "6.9.5rc4"
+next_rc = "6.9.5rc5"
 selected_rc = "6.9.5rc3"
-recommendation = "6.9.5rc3 is selected locally with the Windows schedule time zone drift fix (#609), the Copilot commentary-answer fix (#616), the DuckDB 2.0.1 and NiceGUI 4 dependency fixes (PR #618) and the logs --sql and status --json help text (PR #615). Let it run on the live host: scheduled agents must fire at their local times, and #539 still needs installed operational evidence. If it runs cleanly, the developer decides whether to approve this exact RC for 6.9.5 publication. #588 stays on hold; #604 and #613 are deferred to the next cycle. Changed package source must use RC4."
+recommendation = "6.9.5rc3 is selected locally after 6.9.5rc4 was rolled back because no Windows scheduled task launched under it (#630). Prepare 6.9.5rc5 from main with the local wall-clock schedule design (PR #627) and its Windows trigger fix (PR #631), run isolated acceptance and activate locally with dashboards restored. After activation, runtime maintenance and the life clock agents must be seen launching at their due minutes; roll back to RC3 if they do not. #539 still needs installed operational evidence. If RC5 runs cleanly, the developer decides whether to approve this exact RC for 6.9.5 publication. #588 stays on hold; #604 and #613 are deferred to the next cycle. Changed package source must use RC6."
 
 [cycles."6.9.5".approval]
 decision = "testing"
@@ -256,3 +256,13 @@ source_commit = "fff7743a2ad08363f874e3bafd4658fe54f798a1"
 wheel_sha256 = "076abba28baef4b7de6746838251ea853e0f1575e6aa194f0e111cb38c3b6c06"
 sdist_sha256 = "681bc19e80581bdb1ea38f38c30f49ee68e9b08725e5b4b1bebfc66d2d7d1d76"
 evidence = "Prepared and consumed on 2026-11-22 from main with #609, #616, PR #618 and PR #615. The first preparation run failed one timing-sensitive seam test (the stdio bridge retry under a 50 ms request timeout) while the host was busy; the test passed five of five runs alone, and the unchanged retry with --prepare-attempt passed every gate including packaged dashboard readiness. Isolated hello-world acceptance passed through copilot. local-deploy activated it from 6.9.5rc2 and wrote a receipt; the life dashboard was stopped and restored. Verified afterwards: agents-live --version reports 6.9.5rc3 on the candidate channel, doctor --all-repos exit 0 with 6 schedule triggers registered on local time, and the dashboard answers /api/agents. This history is not publication approval; changed source must use RC4."
+
+[cycles."6.9.5".history."6.9.5rc4"]
+status = "prepared"
+kind = "numbered-rc"
+artifact_version = "6.9.5rc4"
+commit = "891632c23b2236bdfcd9d394d132349e1f7be009"
+source_commit = "6a9a261b068d1e5523e700c28d98bfbb23793d86"
+wheel_sha256 = "0c337784280e4811c8da79aecdca38455364beddcaa0135f0e4fc30ed6112c8b"
+sdist_sha256 = "3f2e70d753f18ef20733622432841b36d86c8e25c64f6fc8aa047cdfda2361a5"
+evidence = "Prepared and consumed from main with the local wall-clock schedule design (#627). Isolated hello-world acceptance passed through copilot. local-deploy activated it from 6.9.5rc3 on 2026-11-24 at 09:59 UTC and restored the life dashboard; doctor --all-repos exited 0 and reported the schedule triggers registered on local time. No Windows scheduled task launched afterwards: runtime maintenance and the life clock agents missed their due minutes and every task reported result 267011, because Task Scheduler ran the unqualified start boundaries on their UTC fields (#630). It was rolled back to 6.9.5rc3 at about 10:10 UTC, after which maintenance fired again, and the life dashboard was restarted on RC3. Doctor and acceptance did not detect the defect. Not acceptable for publication; changed source must use RC5."
