@@ -8451,6 +8451,58 @@ class TestWindowsTaskScheduling(unittest.TestCase):
         with allow_native_runtime():
             self.assertIn("clock launched at expected local minutes", check())
 
+    @unittest.skipUnless(sys.platform == "win32", "Windows probe subprocess")
+    def test_native_probe_registration_margin_and_wrong_minute_rejection(self) -> None:
+        from xml.etree import ElementTree as ET
+        from agents_live.runtime.hosts import clock_readiness
+
+        now = datetime(2026, 11, 24, 23, 59, 59, 990000, tzinfo=timezone.utc)
+
+        def registered(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            directory = Path(argv[5])
+            anchors = []
+            for index in range(2):
+                document = ET.parse(directory / f"{index}.xml")
+                boundary = document.findtext(".//t:StartBoundary", namespaces={"t": task_scheduler._NS})
+                assert boundary is not None
+                anchor = datetime.fromisoformat(boundary)
+                anchors.append(anchor)
+                (directory / f"registered-{index}.xml").write_text(
+                    ET.tostring(document.getroot(), encoding="unicode"), encoding="utf-8")
+                (directory / f"{index}.txt").write_text(
+                    (anchor + timedelta(seconds=delay)).isoformat() + "\n", encoding="utf-8")
+            self.assertGreaterEqual((anchors[0] - now).total_seconds(), 60)
+            self.assertEqual(60, (anchors[1] - anchors[0]).total_seconds())
+            deadline = datetime.fromisoformat(argv[7])
+            self.assertEqual(45, (deadline - anchors[1]).total_seconds())
+            return subprocess.CompletedProcess(argv, 0, "OBSERVED both probes", "")
+
+        for delay in (2, 60):
+            with self.subTest(delay=delay), \
+                 mock.patch.object(clock_readiness, "datetime", wraps=datetime) as clock, \
+                 mock.patch.object(task_scheduler, "hidden_host", return_value=Path(sys.executable)), \
+                 mock.patch.object(task_scheduler, "current_user_id", return_value="probe-user"), \
+                 mock.patch.object(clock_readiness.subprocess, "run", side_effect=registered):
+                clock.now.return_value = now
+                if delay == 60:
+                    with self.assertRaisesRegex(task_scheduler.TaskError, "within 30 seconds"):
+                        clock_readiness.check()
+                else:
+                    self.assertIn("expected local minutes", clock_readiness.check())
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows probe subprocess")
+    def test_native_probe_preserves_per_task_timeout_evidence(self) -> None:
+        from agents_live.runtime.hosts import clock_readiness
+
+        with mock.patch.object(task_scheduler, "hidden_host", return_value=Path(sys.executable)), \
+             mock.patch.object(task_scheduler, "current_user_id", return_value="probe-user"), \
+             mock.patch.object(clock_readiness.subprocess, "run", return_value=
+                               subprocess.CompletedProcess([], 1, "OBSERVED clock-1 timestamps=sample",
+                                                           "clock never launched at both anchors")):
+            with self.assertRaisesRegex(task_scheduler.TaskError,
+                                        "OBSERVED clock-1 timestamps=sample\nclock never launched"):
+                clock_readiness.check()
+
     def test_translate_keeps_natural_intervals_without_extra_minute_wakes(self) -> None:
         reason = "day, weekday and month restrictions are checked at dispatch"
         cases = (

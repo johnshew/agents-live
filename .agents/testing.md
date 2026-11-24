@@ -125,9 +125,11 @@ Use `--plan` to inspect a profile without running checks.
 
 On Windows, packaged dashboard readiness also runs the candidate's native clock
 check before starting the server. It registers two isolated `PT9M` triggers with
-local anchors one and two minutes ahead, verifies their actual timestamp actions
-and UTC/offset readback, then deletes the probe tasks and folder. A schedule that
-never launches fails readiness within 145 seconds. The source seam suite runs
+local anchors at least one full minute ahead, verifies their actual timestamp actions
+and UTC/offset readback, then deletes the probe tasks and folder. Launches must occur
+within 30 seconds of their expected minutes; the deadline follows the last anchor
+by 45 seconds. Registration and observed launch times are reported for each task.
+A schedule that never launches fails readiness in under four minutes. The source seam suite runs
 the same check on Windows and skips it elsewhere; neither check touches the live
 task folder.
 

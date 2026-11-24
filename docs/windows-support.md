@@ -62,8 +62,10 @@ minute, so a covering trigger cannot run the same logical firing twice.
 interactive session.
 
 Windows packaged readiness registers two isolated `PT9M` probe tasks with local
-anchors one and two minutes ahead, then requires timestamp actions at those exact
-local minutes within 145 seconds. It uses the candidate interpreter and renderer,
+anchors that leave at least one full minute for registration. It requires timestamp
+actions within 30 seconds of each expected local minute, waiting until 45 seconds
+after the last anchor. Registration and observed launch times are reported per task.
+It uses the candidate interpreter and renderer,
 never the live task folder, and deletes the probe tasks and folder in `finally`.
 This gate checks actual launches, not just XML or next-run estimates.
 
