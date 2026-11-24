@@ -306,9 +306,12 @@ publication-approved. Do not reuse consumed RC3. 6.9.5rc4 was prepared from
 `6a9a261` with local wall-clock schedules (#627), passed isolated acceptance and
 was activated locally on 2026-11-24, but no Windows scheduled task launched
 under it, so it was rolled back to RC3 about 11 minutes later (#630). It is not
-acceptable for publication. Do not reuse consumed RC4. The next numbered RC is
-`6.9.5rc5`, which adds the Windows trigger fix (#631); after activation,
-scheduled launches must be observed at their due minutes.
+acceptable for publication. Do not reuse consumed RC4. 6.9.5rc5 was prepared
+from `8c90b97` with the Windows trigger fix (#631), passed isolated acceptance
+and was activated locally on 2026-11-24; runtime maintenance and a life clock
+agent were then observed launching within seconds of their due minutes. It is
+not publication-approved. Do not reuse consumed RC5. The next numbered RC is
+`6.9.5rc6`.
 Retained 6.9.2 RC6 does not supersede the approved 6.9.2 RC5 selection. Preserve
 all historical packages,
 receipts and tags, including the rejected unpublished stable-tag conflict.
