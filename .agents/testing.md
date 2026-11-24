@@ -776,3 +776,96 @@ side of slow plugins.
 #### Follow-up
 Fold into the installed-runtime measurement guidance at the next consolidation.
 <!-- /glp-update:v1 id=5543f6ff-7b34-42f7-93b2-c60ee1039247 -->
+
+<!-- glp-update:v1 id=91842652-a9a3-4ef0-b171-3f585c1153d4 -->
+<a id="glp-91842652-a9a3-4ef0-b171-3f585c1153d4"></a>
+### GLP Update: Passing registration checks do not prove live scheduled launches
+
+- Update-ID: 91842652-a9a3-4ef0-b171-3f585c1153d4
+- Recorded-UTC: 2026-11-24T12:46:11Z
+- Kind: addition
+- Topics: test boundaries, native scheduling, installed RC, operational evidence
+- Workstream: 6.9.5rc4 incident and rc5 evaluation
+- Target: .agents/testing.md, Test boundaries and Deploy a numbered RC locally; compared origin/main 8c90b97fd499398bcc708f0890eb304137927e1b
+- Source-Session: incident and RC5 worker evidence review, 2026-11-24
+- Evidence-Basis: observation
+- Application: applied
+- Consolidation: pending
+
+#### Change
+Doctor, trigger readback and isolated acceptance are not evidence that the
+activated runtime's scheduled tasks launch. For schedule-registration changes,
+perform the [post-activation launch check](release.md#glp-bddde36b-b5e5-4222-b510-c390a4564685):
+the next two 5-minute maintenance launches and one clock agent at its due minute,
+using Task Scheduler `LastRunTime`/`LastTaskResult` and
+`agents-live logs timeline`, with rollback if a launch is more than 2 minutes late.
+Keep that live evidence separate from the isolated native packaged-readiness check.
+
+#### Evidence
+- [#630](https://github.com/johnshew/agents-live/issues/630), observed
+  2026-11-24: RC4 passed doctor, readback and isolated acceptance, but no
+  Windows scheduled task launched.
+- [#631](https://github.com/johnshew/agents-live/pull/631) added an executing
+  native clock check to packaged readiness.
+- RC5 worker report, 2026-11-24: both required maintenance launches and the
+  clock-agent launch started within 2 seconds of their due minute.
+
+#### Previous Knowledge
+Test boundaries already distinguish source, artifact and installed behavior;
+Validate the current checkout describes the native packaged check. This adds
+the missing live scheduled-launch evidence after activation, not a replacement gate.
+
+#### Verification and Limits
+Reported incident and worker outcomes were reviewed; this documentation pass
+does not mutate the runtime, repeat RC acceptance or establish publication approval.
+
+#### Follow-up
+Fold the boundary distinction and release-guide link into this guide at consolidation.
+<!-- /glp-update:v1 id=91842652-a9a3-4ef0-b171-3f585c1153d4 -->
+
+<!-- glp-update:v1 id=8875d9d8-1e2e-4ef4-a5e7-3be07111b28e -->
+<a id="glp-8875d9d8-1e2e-4ef4-a5e7-3be07111b28e"></a>
+### GLP Update: Native timing probes must cross the daily repetition boundary
+
+- Update-ID: 8875d9d8-1e2e-4ef4-a5e7-3be07111b28e
+- Recorded-UTC: 2026-11-24T12:46:11Z
+- Kind: addition
+- Topics: native timing, repetition endpoint, probe setup, CI timing, launch evidence
+- Workstream: Windows clock-check review in PR #631
+- Target: .agents/testing.md, Validate the current checkout; compared origin/main 8c90b97fd499398bcc708f0890eb304137927e1b
+- Source-Session: PR #631 review corrections, observed 2026-11-24
+- Evidence-Basis: observation
+- Application: applied
+- Consolidation: pending
+
+#### Change
+Observe native launches past the first day boundary, not just the first day's
+launch. An isolated trigger anchored yesterday can exercise the next daily cycle
+without a day-long wait. Finish prerequisite setup before choosing anchors and
+reserve explicit lead time for registration. Report every observed launch time,
+including duplicates and wrong-minute launches. Allow slow CI setup and polling
+through suitable lead time and deadlines, without relaxing the expected-minute
+assertion or treating a late wrong-minute launch as success.
+
+#### Evidence
+[PR #631](https://github.com/johnshew/agents-live/pull/631), observed
+2026-11-24: the inclusive repetition endpoint duplicated launches only on day
+two, which the first-day probe missed. Review corrections shortened repetition
+to the last intended daily launch, exercised a yesterday-anchored `PT12H`
+trigger alongside `PT9M`, gave registration a full minute of lead time,
+and reported observed timestamps while rejecting wrong-minute launches.
+
+#### Previous Knowledge
+What deserves a test requires causal fixtures and real side effects.
+Validate the current checkout already describes yesterday anchoring, duplicate
+observation and a 30-second launch window. This records why those properties
+matter and how future probe changes must preserve them under slow CI setup.
+
+#### Verification and Limits
+PR #631 review commits and the current native-check description support this
+method lesson. No timing probe was rerun in this documentation-only pass;
+short isolated observations do not establish long-term reliability.
+
+#### Follow-up
+Consolidate into native timing guidance without weakening expected-minute checks.
+<!-- /glp-update:v1 id=8875d9d8-1e2e-4ef4-a5e7-3be07111b28e -->

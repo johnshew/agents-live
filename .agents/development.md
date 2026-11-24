@@ -694,3 +694,90 @@ chat state; the check script does not read it.
 #### Follow-up
 Fold into the orchestration guidance at the next consolidation of this document.
 <!-- /glp-update:v1 id=ec973a90-89d2-4005-949e-a3b106576e96 -->
+
+<!-- glp-update:v1 id=c5cb9493-2d82-40f1-bd3c-e198ec5ef9cb -->
+<a id="glp-c5cb9493-2d82-40f1-bd3c-e198ec5ef9cb"></a>
+### GLP Update: Verify Git teardown before treating a held empty folder as failure
+
+- Update-ID: c5cb9493-2d82-40f1-bd3c-e198ec5ef9cb
+- Recorded-UTC: 2026-11-24T12:46:11Z
+- Kind: addition
+- Topics: close-out, Windows worktrees, cleanup, permission denied
+- Workstream: 6.9.5rc4 incident and rc5 close-out
+- Target: .agents/development.md, Orchestrating delegates and child sessions, Close out finished children; compared origin/main 8c90b97fd499398bcc708f0890eb304137927e1b
+- Source-Session: coordinator close-out observations, 2026-11-24
+- Evidence-Basis: observation
+- Application: applied
+- Consolidation: pending
+
+#### Change
+On Windows, `git worktree remove` can leave an empty folder held open by another
+process and report "permission denied" after Git teardown has succeeded.
+Verify the worktree registration is absent with `git worktree list`, verify
+the local branch is gone when its deletion was intended, and verify the remaining
+folder is empty. If those checks pass, Git close-out is complete; delete the
+residual folder later when its handle is released. Do not force removal or
+terminate an unrelated process to hide the warning.
+
+#### Evidence
+Coordinator observation, 2026-11-24: Windows cleanup left an empty held folder
+with "permission denied", while the Git registration and local branch were gone.
+The folder could be deleted later.
+
+#### Previous Knowledge
+Close out finished children defines safe teardown and protects app-managed
+worktrees. It does not distinguish completed Git teardown from delayed filesystem
+cleanup. Those ownership and clean-worktree prerequisites still apply.
+
+#### Verification and Limits
+The supplied observation is not reproduced by this docs pass. A permission
+error alone is not success: remaining registration, branch or files require
+investigation, and branch removal is a separate check.
+
+#### Follow-up
+Fold into close-out guidance at a separately scoped consolidation.
+<!-- /glp-update:v1 id=c5cb9493-2d82-40f1-bd3c-e198ec5ef9cb -->
+
+<!-- glp-update:v1 id=9ce30ac0-4b6a-4cee-b85a-3bcccf32ce8a -->
+<a id="glp-9ce30ac0-4b6a-4cee-b85a-3bcccf32ce8a"></a>
+### GLP Update: Simplify a failing design before layering another workaround
+
+- Update-ID: 9ce30ac0-4b6a-4cee-b85a-3bcccf32ce8a
+- Recorded-UTC: 2026-11-24T12:46:11Z
+- Kind: addition
+- Topics: design simplification, corrective fixes, native boundaries, regression evidence
+- Workstream: Windows clock-trigger correction in PR #631
+- Target: .agents/development.md, Conventions; compared origin/main 8c90b97fd499398bcc708f0890eb304137927e1b
+- Source-Session: PR #631 design evidence review, 2026-11-24
+- Evidence-Basis: observation
+- Application: applied
+- Consolidation: pending
+
+#### Change
+When a fix needs a second fix, first reconsider and simplify its design rather
+than layering another workaround. Remove machinery made unnecessary by the
+simpler model, then verify the observable result at the real boundary.
+Preserve required behavior and validation; fewer paths alone do not prove correctness.
+
+#### Evidence
+[PR #631](https://github.com/johnshew/agents-live/pull/631), observed
+2026-11-24, replaced the 24 hourly-trigger design with a UTC-anchored repeating
+trigger for regular schedules and removed its cap and simulator paths.
+An executing native launch check replaced simulation as evidence that the
+registered schedule actually launches. Irregular schedules still require
+multiple exact arithmetic runs.
+
+#### Previous Knowledge
+Conventions already requires minimal diffs; [testing.md, What deserves a
+test](testing.md#what-deserves-a-test) requires real boundary evidence.
+Neither explicitly says to reassess the design when a corrective fix itself
+needs correction. This is a method lesson, not a new trigger-count guarantee.
+
+#### Verification and Limits
+The incident and PR #631 support this example. The PR also retained native
+platform limits; simplification does not authorize removing necessary limits
+or changing unrelated behavior.
+
+#### Follow-up
+Fold into development conventions at a separately scoped consolidation.
+<!-- /glp-update:v1 id=9ce30ac0-4b6a-4cee-b85a-3bcccf32ce8a -->
