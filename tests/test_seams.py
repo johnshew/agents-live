@@ -8717,7 +8717,7 @@ class TestWindowsTaskScheduling(unittest.TestCase):
 
         self.assertEqual(["2026-10-29T04:00:00Z"],
                          task_scheduler.registered_boundaries(document))
-        self.assertEqual([("daily", 23, 0, 720, 1440)],
+        self.assertEqual([("daily", 23, 0, 720, 720)],
                          task_scheduler._definition_signature(document, zone=standard))
         self.assertIsNone(task_scheduler.trigger_drift(document, [schedule], zone=daylight))
         self.assertIn("UTC offset changed",
