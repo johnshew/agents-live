@@ -8445,7 +8445,7 @@ class TestDashboardRepositorySurface(TempRepository):
 
 class TestWindowsTaskScheduling(unittest.TestCase):
     @unittest.skipUnless(sys.platform == "win32", "native Windows clock")
-    def test_native_clock_launches_and_repeats(self) -> None:
+    def test_native_clock_launches_without_daily_overlap(self) -> None:
         from agents_live.runtime.hosts.clock_readiness import check
 
         with allow_native_runtime():
@@ -8466,6 +8466,8 @@ class TestWindowsTaskScheduling(unittest.TestCase):
                 boundary = document.findtext(".//t:StartBoundary", namespaces={"t": task_scheduler._NS})
                 assert boundary is not None
                 anchor = datetime.fromisoformat(boundary)
+                if index == 1:
+                    anchor += timedelta(days=1)
                 anchors.append(anchor)
                 (directory / f"registered-{index}.xml").write_text(
                     ET.tostring(document.getroot(), encoding="unicode"), encoding="utf-8")
@@ -8473,6 +8475,7 @@ class TestWindowsTaskScheduling(unittest.TestCase):
                     (anchor + timedelta(seconds=delay)).isoformat() + "\n", encoding="utf-8")
             self.assertGreaterEqual((anchors[0] - now).total_seconds(), 60)
             self.assertEqual(60, (anchors[1] - anchors[0]).total_seconds())
+            self.assertEqual(anchors, [datetime.fromisoformat(value) for value in argv[8:]])
             deadline = datetime.fromisoformat(argv[7])
             self.assertEqual(45, (deadline - anchors[1]).total_seconds())
             return subprocess.CompletedProcess(argv, 0, "OBSERVED both probes", "")
@@ -8526,8 +8529,8 @@ class TestWindowsTaskScheduling(unittest.TestCase):
                 for item in translated:
                     first = item["hour"] * 60 + item["minute"]
                     step = int(item.get("interval_minutes") or 1440)
-                    duration = int(item.get("duration_minutes") or 1)
-                    native.update(range(first, first + duration, step))
+                    duration = int(item.get("duration_minutes") or 0)
+                    native.update(range(first, first + duration + 1, step))
                 for minute in range(1440):
                     moment = datetime(2026, 9, 8) + timedelta(minutes=minute)
                     if expected_reason is None:
@@ -8540,6 +8543,25 @@ class TestWindowsTaskScheduling(unittest.TestCase):
         self.assertEqual(3, len(task_scheduler.trigger_signature(
             ["1 * * * *", "2 * * * *", "3 * * * *"])))
 
+    def test_inclusive_repeat_endpoints_do_not_overlap_later_daily_anchors(self) -> None:
+        from collections import Counter
+
+        for expression in ("* * * * *", "0 */12 * * *", "2-59/20 * * * *",
+                           "*/7 * * * *", "5,17,44 * * * *"):
+            with self.subTest(expression=expression):
+                native: Counter[int] = Counter()
+                for trigger in task_scheduler.translate(expression):
+                    first = int(trigger["hour"]) * 60 + int(trigger["minute"])
+                    step = int(trigger.get("interval_minutes") or 1440)
+                    duration = int(trigger.get("duration_minutes") or 0)
+                    for day in range(-1, 3):
+                        native.update(day * 1440 + minute
+                                      for minute in range(first, first + duration + 1, step))
+                due = triggers._schedule_matcher(expression)
+                for minute in range(3 * 1440):
+                    moment = datetime(2026, 11, 24) + timedelta(minutes=minute)
+                    self.assertEqual(int(due(moment)), native[minute], (expression, moment))
+
     def test_diagnostics_preserve_results_with_bounded_schedule_parsing(self) -> None:
         now = datetime(2026, 9, 8, 12, tzinfo=timezone(timedelta(hours=-4)))
         days = "day, weekday and month restrictions are checked at dispatch"
@@ -8547,13 +8569,13 @@ class TestWindowsTaskScheduling(unittest.TestCase):
             ("@monthly", "0 0 1 * *", "daily", 1, None, None,
              "2026-09-08T04:00:00Z", False, days, 365, 12, "year",
              "covering translation with 365 native firing(s) per year (12 due): " + days),
-            ("0 */12 * * *", "0 */12 * * *", "daily", 1, "PT12H", "P1D",
+            ("0 */12 * * *", "0 */12 * * *", "daily", 1, "PT12H", "PT12H",
              "2026-09-08T04:00:00Z", True, None, 2, 2, "day",
              "exact translation with 2 native firing(s) per day"),
             ("*/10 9-17 * * MON-FRI", "*/10 9-17 * * MON-FRI", "daily", 1,
-             "PT10M", "PT8H51M", "2026-09-08T13:00:00Z", False, days, 378, 270, "week",
+             "PT10M", "PT8H50M", "2026-09-08T13:00:00Z", False, days, 378, 270, "week",
              "covering translation with 378 native firing(s) per week (270 due): " + days),
-            ("1,7,22,58 * * * *", "1,7,22,58 * * * *", "daily", 4, "PT1H", "P1D",
+            ("1,7,22,58 * * * *", "1,7,22,58 * * * *", "daily", 4, "PT1H", "PT23H",
              "2026-09-08T04:01:00Z", True, None, 96, 96, "day",
              "exact translation with 96 native firing(s) per day"),
             ("@reboot", "@reboot", "boot", 1, None, None, "on logon", True, None,

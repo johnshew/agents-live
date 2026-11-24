@@ -458,7 +458,8 @@ def translate(schedule: str) -> list[dict[str, object]]:
         }
         if len(best) > 1:
             step = best[1] - first
-            duration = 1440 if last - first + step == 1440 else last - first + 1
+            # Task Scheduler includes the repetition duration's endpoint.
+            duration = last - first
             trigger.update(
                 interval=_format_interval(step), interval_minutes=step,
                 duration=_format_duration(duration), duration_minutes=duration,
@@ -1077,8 +1078,8 @@ def diagnostics(schedule: str, now: datetime | None = None, *,
         moment += timedelta(minutes=1)
     days = (ref_end.date() - ref_start.date()).days + 1
     native_count = days * sum(
-        (int(item["duration_minutes"]) + int(item["interval_minutes"]) - 1)
-        // int(item["interval_minutes"]) if item.get("interval_minutes") else 1
+        int(item["duration_minutes"]) // int(item["interval_minutes"]) + 1
+        if item.get("interval_minutes") else 1
         for item in triggers_list
     )
 

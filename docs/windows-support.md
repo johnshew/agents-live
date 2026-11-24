@@ -39,7 +39,9 @@ scope, subscription identity, fingerprint, and process role.
 Regular cron expressions compile to one daily calendar trigger with repetition
 at the schedule's natural interval, such as 12 hours or 20 minutes. Irregular
 minute or hour lists are grouped into exact arithmetic runs, without extra
-minute wakes. The anchor is today's local midnight plus the run's first
+minute wakes. Repetition ends at the last intended occurrence, because Windows
+includes the duration endpoint; a full-day window would overlap the next day's
+anchor. The anchor is today's local midnight plus the run's first
 scheduled minute, converted to UTC and written with an explicit `Z` suffix.
 Task Scheduler can normalize that suffix to `+00:00` on export; readback treats
 both as the same UTC instant.
@@ -61,10 +63,13 @@ minute, so a covering trigger cannot run the same logical firing twice.
 `@reboot` maps to a logon trigger because tasks run in the developer's
 interactive session.
 
-Windows packaged readiness registers two isolated `PT9M` probe tasks with local
-anchors that leave at least one full minute for registration. It requires timestamp
+Windows packaged readiness registers isolated `PT9M` and `PT12H` probe tasks.
+The first anchor is in the future; the second is yesterday at an upcoming local
+minute, so its next daily cycle is observed without waiting a day. Setup finishes
+before choosing times that leave at least one full minute for registration. It requires timestamp
 actions within 30 seconds of each expected local minute, waiting until 45 seconds
-after the last anchor. Registration and observed launch times are reported per task.
+after the last anchor. It watches the full 30-second launch window to reject
+duplicate launches. Registration and observed launch times are reported per task.
 It uses the candidate interpreter and renderer,
 never the live task folder, and deletes the probe tasks and folder in `finally`.
 This gate checks actual launches, not just XML or next-run estimates.

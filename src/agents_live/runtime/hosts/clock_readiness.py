@@ -14,7 +14,7 @@ from . import task_scheduler
 
 
 _PROBE = r"""
-param($Directory, $FolderName, $DeadlineUtc)
+param($Directory, $FolderName, $DeadlineUtc, $ExpectedFirstUtc, $ExpectedSecondUtc)
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 $service = New-Object -ComObject Schedule.Service
@@ -23,20 +23,21 @@ $root = $service.GetFolder('\')
 $folder = $root.CreateFolder($FolderName)
 $registered = @()
 $observed = @{}
+$expected = @($ExpectedFirstUtc, $ExpectedSecondUtc)
+$deadline = [DateTimeOffset]::Parse($DeadlineUtc)
 try {
     foreach ($index in 0,1) {
         $xml = [System.IO.File]::ReadAllText((Join-Path $Directory "$index.xml"))
         $task = $folder.RegisterTask("clock-$index", $xml, 6, $null, $null, 3, $null)
         $registered += "clock-$index"
         $boundary = ([xml]$xml).Task.Triggers.CalendarTrigger.StartBoundary
-        Write-Output "REGISTER clock-$index expected=$boundary registered=$([DateTimeOffset]::UtcNow.ToString('o'))"
+        Write-Output "REGISTER clock-$index expected=$($expected[$index]) boundary=$boundary registered=$([DateTimeOffset]::UtcNow.ToString('o'))"
         [System.IO.File]::WriteAllText(
             (Join-Path $Directory "registered-$index.xml"), $task.Xml)
-        if ([DateTimeOffset]::UtcNow -ge [DateTimeOffset]::Parse($boundary)) {
+        if ([DateTimeOffset]::UtcNow -ge [DateTimeOffset]::Parse($expected[$index])) {
             throw "registration missed the planned anchor for clock-$index"
         }
     }
-    $deadline = [DateTimeOffset]::Parse($DeadlineUtc)
     do {
         Start-Sleep -Seconds 1
         foreach ($index in 0,1) {
@@ -49,7 +50,8 @@ try {
                 }
             }
         }
-        if ($observed.Count -eq 2) { exit 0 }
+        if ($observed.Count -eq 2 -and
+            [DateTimeOffset]::UtcNow -ge $deadline.AddSeconds(-15)) { exit 0 }
     } while ([DateTimeOffset]::UtcNow -lt $deadline)
     foreach ($name in $registered) {
         $task = $folder.GetTask($name)
@@ -65,7 +67,7 @@ try {
 
 
 def check() -> str:
-    """Prove PT9M launches, allowing a full minute for native registration."""
+    """Prove future PT9M launches and second-day PT12H launches without overlap."""
     if sys.platform != "win32":
         return "skipped: native clock readiness requires Windows"
     with tempfile.TemporaryDirectory(prefix="agents-live-clock-") as temporary:
@@ -74,13 +76,8 @@ def check() -> str:
         if command is None:
             raise task_scheduler.TaskError("native clock readiness requires pythonw")
         folder = "AgentsLiveProbe-" + uuid4().hex
-        now = datetime.now().astimezone()
-        anchors = [
-            (now + timedelta(minutes=index + 2)).replace(second=0, microsecond=0)
-            for index in range(2)
-        ]
-        identities = []
-        for index, anchor in enumerate(anchors):
+        user_id = task_scheduler.current_user_id()
+        for index in range(2):
             output = directory / f"{index}.txt"
             action = directory / f"stamp-{index}.py"
             action.write_text(
@@ -90,38 +87,48 @@ def check() -> str:
                 "    stream.write(datetime.now().astimezone().isoformat() + '\\n')\n",
                 encoding="utf-8",
             )
-            document = task_scheduler.build_task_xml(
-                command=str(command),
-                arguments=task_scheduler.argument_string([str(action)]),
-                working_dir=str(directory), schedules=["0,9 0 * * *"],
-                description="Isolated native clock readiness",
-                uri=f"\\{folder}\\clock-{index}",
-                user_id=task_scheduler.current_user_id(),
-            )
-            task = ET.fromstring(document.split("?>", 1)[-1].strip())
-            ns = {"t": task_scheduler._NS}
-            boundary = task.find("t:Triggers/t:CalendarTrigger/t:StartBoundary", ns)
-            duration = task.find("t:Triggers/t:CalendarTrigger/t:Repetition/t:Duration", ns)
-            if boundary is None or duration is None:
-                raise task_scheduler.TaskError("native clock renderer omitted its repeating trigger")
-            # Move the PT9M test's anchor ahead instead of waiting until midnight.
-            boundary.text = task_scheduler._wall_clock(anchor)
-            duration.text = "P1D"
-            if task_scheduler.boundary_form(ET.tostring(task, encoding="unicode")) != task_scheduler.UTC:
-                raise task_scheduler.TaskError("native clock renderer did not produce an explicit UTC boundary")
-            identities.append(task_scheduler.registered_trigger_identity(
-                ET.tostring(task, encoding="unicode")))
-            (directory / f"{index}.xml").write_bytes(ET.tostring(task, encoding="utf-16"))
         script = directory / "probe.ps1"
         script.write_text(_PROBE, encoding="utf-8")
         powershell = (
             Path(os.environ["SystemRoot"]) / "System32"
             / "WindowsPowerShell" / "v1.0" / "powershell.exe"
         )
+        now = datetime.now().astimezone()
+        anchors = [
+            (now + timedelta(minutes=index + 2)).replace(second=0, microsecond=0)
+            for index in range(2)
+        ]
+        identities = []
+        for index, anchor in enumerate(anchors):
+            action = directory / f"stamp-{index}.py"
+            document = task_scheduler.build_task_xml(
+                command=str(command),
+                arguments=task_scheduler.argument_string([str(action)]),
+                working_dir=str(directory),
+                schedules=["0,9 0 * * *" if index == 0 else "0 */12 * * *"],
+                description="Isolated native clock readiness",
+                uri=f"\\{folder}\\clock-{index}",
+                user_id=user_id,
+            )
+            task = ET.fromstring(document.split("?>", 1)[-1].strip())
+            ns = {"t": task_scheduler._NS}
+            boundary = task.find("t:Triggers/t:CalendarTrigger/t:StartBoundary", ns)
+            interval = task.find("t:Triggers/t:CalendarTrigger/t:Repetition/t:Interval", ns)
+            if boundary is None or interval is None:
+                raise task_scheduler.TaskError("native clock renderer omitted its repeating trigger")
+            # Yesterday's second anchor exercises the next daily cycle immediately.
+            registration_anchor = anchor if index == 0 else anchor - timedelta(days=1)
+            boundary.text = task_scheduler._wall_clock(registration_anchor)
+            if task_scheduler.boundary_form(ET.tostring(task, encoding="unicode")) != task_scheduler.UTC:
+                raise task_scheduler.TaskError("native clock renderer did not produce an explicit UTC boundary")
+            identities.append(task_scheduler.registered_trigger_identity(
+                ET.tostring(task, encoding="unicode")))
+            (directory / f"{index}.xml").write_bytes(ET.tostring(task, encoding="utf-16"))
         completed = subprocess.run(
             [str(powershell), "-NoProfile", "-NonInteractive", "-File",
              str(script), str(directory), folder,
-             (anchors[-1] + timedelta(seconds=45)).isoformat()],
+             (anchors[-1] + timedelta(seconds=45)).isoformat(),
+             *(anchor.isoformat() for anchor in anchors)],
             capture_output=True, text=True, encoding="utf-8",
             creationflags=subprocess.CREATE_NO_WINDOW,
         )
