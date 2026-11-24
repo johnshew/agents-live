@@ -698,3 +698,94 @@ Consider whether the watcher observer deadline should account for plugin
 loading, or whether watcher start-up should defer plugin import (#604). Fold
 into the numbered RC guidance at the next consolidation.
 <!-- /glp-update:v1 id=ec8c594d-1999-4213-8ca2-cde4ade4643a -->
+
+<!-- glp-update:v1 id=bddde36b-b5e5-4222-b510-c390a4564685 -->
+<a id="glp-bddde36b-b5e5-4222-b510-c390a4564685"></a>
+### GLP Update: Observe scheduled launches after schedule-changing RC activation
+
+- Update-ID: bddde36b-b5e5-4222-b510-c390a4564685
+- Recorded-UTC: 2026-11-24T12:46:11Z
+- Kind: addition
+- Topics: RC activation, native scheduling, operational acceptance, rollback
+- Workstream: 6.9.5rc4 incident and rc5 evaluation
+- Target: .agents/release.md, Numbered RC lifecycle; compared origin/main 8c90b97fd499398bcc708f0890eb304137927e1b
+- Source-Session: incident and RC5 worker evidence review, 2026-11-24
+- Evidence-Basis: observation
+- Application: applied
+- Consolidation: pending
+
+#### Change
+After activating any RC that changes schedule registration, observe runtime
+maintenance at the next two 5-minute marks and at least one clock agent at its
+due minute. Correlate Task Scheduler `LastRunTime` and `LastTaskResult` with
+`agents-live logs timeline`, recording each due and observed launch time.
+Roll back to the previous RC if any required launch is more than 2 minutes late,
+using the existing dashboard and watcher restoration procedure.
+
+#### Evidence
+- [#630](https://github.com/johnshew/agents-live/issues/630), observed
+  2026-11-24: doctor, trigger readback and isolated acceptance passed for
+  6.9.5rc4, yet no Windows scheduled task launched. Rollback restored maintenance.
+- RC5 worker report, 2026-11-24: maintenance at 16:30 and 16:35 and a clock
+  agent at 16:42 (local time, UTC+04:00) all started within 2 seconds of their
+  due minute; Task Scheduler results were 0 and correlated runs succeeded.
+- [#631](https://github.com/johnshew/agents-live/pull/631) added the native
+  clock check to packaged readiness; that isolated check is not live activation.
+
+#### Previous Knowledge
+Numbered RC lifecycle separates isolated acceptance from operational checks;
+[testing.md, Deploy a numbered RC locally](testing.md#deploy-a-numbered-rc-locally)
+requires identity, doctor and restoration checks. Neither specifies these
+post-activation launch observations or the 2-minute rollback threshold.
+
+#### Verification and Limits
+This pass records reported observations, not a new activation or runtime test.
+Three timely RC5 launches establish this local check, not publication approval
+or long-term scheduling reliability.
+
+#### Follow-up
+Fold into RC operational evaluation at a separately scoped consolidation.
+<!-- /glp-update:v1 id=bddde36b-b5e5-4222-b510-c390a4564685 -->
+
+<!-- glp-update:v1 id=06a12ac9-b6e1-4f38-aa04-68de6d8a863b -->
+<a id="glp-06a12ac9-b6e1-4f38-aa04-68de6d8a863b"></a>
+### GLP Update: Confirm the configured next RC before preparation
+
+- Update-ID: 06a12ac9-b6e1-4f38-aa04-68de6d8a863b
+- Recorded-UTC: 2026-11-24T12:46:11Z
+- Kind: addition
+- Topics: numbered attempts, next_rc, manifest history, preparation
+- Workstream: 6.9.5rc4 incident and rc5 evaluation
+- Target: .agents/release.md, Numbered attempt commands; compared origin/main 8c90b97fd499398bcc708f0890eb304137927e1b
+- Source-Session: RC5 preparation and PR #632 evidence review, 2026-11-24
+- Evidence-Basis: observation
+- Application: applied
+- Consolidation: pending
+
+#### Change
+Before preparing an RC, confirm that the selected cycle's `next_rc` in
+[.github/release-cycles.toml](../.github/release-cycles.toml) names the intended
+attempt. After a consumed or rolled-back attempt, record its history and
+advance `next_rc` on main before preparing the next attempt.
+`release.py --prepare-rc` refuses an identity other than the configured next RC;
+do not bypass the guard or reuse a consumed identity.
+
+#### Evidence
+[PR #632](https://github.com/johnshew/agents-live/pull/632), observed
+2026-11-24, recorded the consumed RC4 and rollback and advanced `next_rc` to
+6.9.5rc5. The RC5 worker's initial preparation was refused before allocation;
+preparation resumed after this metadata change reached main.
+
+#### Previous Knowledge
+[Update 44e97798](#glp-44e97798-a467-4dd5-a714-5195a7aedd5c) requires prompt
+history recording after preparation and activation. Numbered attempt commands
+already require the configured next RC. This adds an explicit preflight and
+ordering after consumption or rollback, including attempts no longer active.
+
+#### Verification and Limits
+One preparation refusal and recovery, reconciled with PR #632. This append
+does not change routing values, allocation rules or retained evidence.
+
+#### Follow-up
+Consolidate with update 44e97798 in a separately scoped release-guide pass.
+<!-- /glp-update:v1 id=06a12ac9-b6e1-4f38-aa04-68de6d8a863b -->
