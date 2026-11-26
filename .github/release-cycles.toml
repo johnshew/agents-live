@@ -202,16 +202,16 @@ evidence = "Prepared and consumed from main on 2026-10-08; packaged readiness an
 
 [cycles."6.9.5"]
 branch = "main"
-next_rc = "6.9.5rc6"
-selected_rc = "6.9.5rc5"
-recommendation = "6.9.5rc5 is selected locally with the local wall-clock schedule design (PR #627) and its Windows trigger fix (PR #631); runtime maintenance and a life clock agent were observed launching on time after activation. Let it run on the live host: scheduled agents must keep firing at their local times, and #539 still needs installed operational evidence. If it runs cleanly, the developer decides whether to approve this exact RC for 6.9.5 publication. #588 stays on hold; #604 and #613 are deferred to the next cycle. Changed package source must use RC6."
+next_rc = "6.9.5rc7"
+selected_rc = "6.9.5rc6"
+recommendation = "6.9.5rc6 is selected locally with PR #635's watcher startup timeout and exit-log schema fixes. Isolated hello-world acceptance passed; local activation reused the prepared bytes, doctor --all-repos exited 0 with 6 schedule triggers registered for the current local UTC offset, and started agents including the watcher are running on RC6. #636's aggregate watcher startup gate-hold budget follow-up is deferred to the next cycle. This RC is not publication-approved; the developer must decide whether to approve this exact RC. Changed package source must use RC7."
 
 [cycles."6.9.5".approval]
 decision = "testing"
 
 [cycles."6.9.5".issues]
 planned = [582, 591, 590, 601, 602, 603, 539, 609, 616]
-deferred = [588, 566, 567, 604, 613]
+deferred = [588, 566, 567, 604, 613, 636]
 
 [cycles."6.9.5".decisions]
 "582" = "Developer assigned lock hold time, launch timing, runtime identity and watcher exit evidence to 6.9.5 on 2026-10-09; merged to main in PR #587."
@@ -226,6 +226,7 @@ deferred = [588, 566, 567, 604, 613]
 "609" = "Developer directed on 2026-11-22 that RC3 carry only the time zone fix as new runtime scope at that point; merged to main in PR #611."
 "616" = "Developer chose on 2026-11-22 to fix the Copilot commentary-answer extraction in RC3; merged to main in PR #617."
 "613" = "Developer deferred the dashboard deleted-client warning to the release after 6.9.5 on 2026-11-22."
+"636" = "Aggregate watcher startup gate-hold budget follow-up from PR #635 review; deferred to the next cycle."
 
 [cycles."6.9.5".history."6.9.5rc1"]
 status = "prepared"
@@ -275,3 +276,13 @@ source_commit = "8c90b97fd499398bcc708f0890eb304137927e1b"
 wheel_sha256 = "b2941b7902675fa2332d1284dbbf1e4f054a5f3377ec09d56c4d05e36cfc39ac"
 sdist_sha256 = "cffdb4f16a24e0d1932a648c47944b499850e3e5fbedbbeba71cc0c8da3ee5f7"
 evidence = "Prepared and consumed on 2026-11-24 from main with the Windows trigger fix (#631). Every preparation gate passed, including packaged dashboard readiness with the native clock check, whose probe tasks launched at their expected minutes. Isolated hello-world acceptance passed through copilot. local-deploy activated it from 6.9.5rc3 at 12:26 UTC, reused the prepared bytes and restored the life dashboard. Afterwards runtime maintenance launched at its next two 5-minute marks and life-update at its next due minute, each within 2 seconds and with result 0; doctor --all-repos exited 0 with 6 triggers registered for the current UTC offset, and the dashboard answers /api/agents. This history is not publication approval; changed source must use RC6."
+
+[cycles."6.9.5".history."6.9.5rc6"]
+status = "prepared"
+kind = "numbered-rc"
+artifact_version = "6.9.5rc6"
+commit = "33d74a0de46cef95629bd7b077fa94a1a5bd7b74"
+source_commit = "4cdf0fbad92c9ae9d3ddc1952ba8d9d435c79c1a"
+wheel_sha256 = "b4c3bced25a33d27fc8f7d823c2c126b35a10e37fd3f414704d447a482142191"
+sdist_sha256 = "f7b944d3b57cd3a53068985f8be26365f7ad0621e4596047dc8eec0c0611dcdf"
+evidence = "Prepared and consumed from main on 2026-11-26 with PR #635's watcher startup timeout and exit-log schema fixes, plus PR #637's changelog and docs update. Source and packaged readiness passed all gates. Isolated hello-world acceptance passed through copilot. local-deploy activated it from 6.9.5rc5 at about 16:09 UTC, reusing the prepared bytes. agents-live --version reports 6.9.5rc6 on the candidate channel; doctor --all-repos exited 0 with 6 schedule triggers registered for the current local UTC offset, and started agents including the watcher are running on RC6. This history is not publication approval; changed source must use RC7."

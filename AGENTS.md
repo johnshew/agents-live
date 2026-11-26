@@ -311,7 +311,10 @@ from `8c90b97` with the Windows trigger fix (#631), passed isolated acceptance
 and was activated locally on 2026-11-24; runtime maintenance and a life clock
 agent were then observed launching within seconds of their due minutes. It is
 not publication-approved. Do not reuse consumed RC5. The next numbered RC is
-`6.9.5rc6`.
+`6.9.5rc6`. 6.9.5rc6 was prepared from `4cdf0fb` with the watcher startup
+timeout and exit-log schema fixes from PR #635, passed isolated acceptance, and
+was locally activated on 2026-11-26. It is not publication-approved. Do not
+reuse consumed RC6. The next numbered RC is `6.9.5rc7`.
 Retained 6.9.2 RC6 does not supersede the approved 6.9.2 RC5 selection. Preserve
 all historical packages,
 receipts and tags, including the rejected unpublished stable-tag conflict.
