@@ -150,7 +150,7 @@ Convergence persists every idle stop intent before termination and logs busy
 deferrals without claiming a termination. Cooperative retirement supplies its
 activation, replacement or watch-failure reason; an unexplained exit is explicitly
 `unexpected_exit`.
-The launcher waits at most five seconds for the observer's child identity, not
+The launcher waits at most 30 seconds for the observer's child identity, not
 for functional watch-loop acceptance. Watcher descendants are owned before
 execution and cleaned up before declaring stderr complete.
 On Windows only watcher jobs permit explicit breakaway, and only a replacement
