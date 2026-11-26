@@ -98,7 +98,12 @@ reports any package and skill payload version mismatch.
 - Keep `README.md` and the skill docs consistent - the README's
   feature claims and Documentation links mirror
   `src/agents_live/skill/docs/overview.md`.
-- Minimal diffs; match the style of the surrounding code and docs.
+- Keep diffs minimal and match the style of the surrounding code and docs.
+- When a correction itself needs another fix, reassess and simplify the design
+  before adding another workaround. Remove machinery made unnecessary by the
+  simpler model, preserve required behavior and validation, and verify the
+  observable result at the real boundary. Fewer paths alone do not prove
+  correctness. This approach was demonstrated in [PR #631](https://github.com/johnshew/agents-live/pull/631).
 
 ## Subagent models and effort
 
@@ -120,6 +125,37 @@ or app child sessions. They add no commit, merge, release or runtime authority.
   developer input is not blocked. While the developer is active, report and
   take steering before starting another batch. Run status checks with explicit
   repository paths so a delegate's working directory cannot mislead the report.
+- **Attach one self-wake automation while coordinating active work.** In the
+  GitHub Copilot app, attach a single same-session automation that wakes about
+  every 10 minutes and clear it on explicit shutdown with a final handoff. Use
+  this step list as its prompt template, in order:
+  0. Preflight: before any `gh` write, clear `GH_TOKEN` and `GITHUB_TOKEN`, run
+     `gh auth switch --hostname github.com --user <origin-owner>` in the same
+     process, and verify `gh api user --jq .login`.
+  1. Check: run `uv run --script tools/coordinator-check.py`, then follow the
+     heartbeat procedure below for child state and new coordination-channel
+     posts. When the check has no findings and no child or channel item needs
+     attention, end the tick silently.
+  2. Unblock: read session status; answer every owned child awaiting input or
+     plan approval within existing authority and resume interrupted children.
+     Investigate each `STALLED` worker. Escalate only new scope or authority,
+     with options and a recommendation.
+  3. Pull requests: for each PR the check reports ready, merge only a PR the
+     developer authorized, one head at a time with the full-SHA guard, then
+     read the result back; otherwise report it ready for review.
+  4. Runtime health: for reported runtime errors, query detail with
+     `agents-live logs --all --since 15m --errors`; investigate through a
+     delegate and never change the live runtime without authority.
+  5. Release state: when release-relevant state changed, run
+     `uv run --script tools/release-report.py` and note changes in readiness,
+     blockers or next action.
+  6. Cleanup: archive finished owned children (see below), preserving needed
+     artifacts first. Remove only clean worktrees the check reports as
+     `HYGIENE`, without `--force`.
+  7. Report: message the creator only when something changed or needs a
+     decision, in plain language. Silence is fine on a no-change tick. The
+     heartbeat reports but never acts or posts to the issue; change its
+     behavior through the script.
 - **A coordinator turn dispatches, records and ends.** Use the coordinator only
   for commands that finish in seconds, decisions and verification of delegate
   evidence; delegate tests, builds and implementation. Long work belongs in
@@ -140,33 +176,6 @@ or app child sessions. They add no commit, merge, release or runtime authority.
   failed. Treat every `STALLED` or `UNKNOWN` line as a prompt to investigate
   the owning worker now, not at the next report. Empty output is the evidence
   that nothing changed; do not re-check the same items by hand.
-- **Attach one self-wake automation while coordinating active work.** In the
-  GitHub Copilot app, attach a single 11-minute same-session automation to the
-  orchestrator and clear it on explicit shutdown with a final handoff. Use this
-  step list as its prompt template, in order:
-  0. Preflight: before any `gh` write, clear `GH_TOKEN` and `GITHUB_TOKEN`, run
-     `gh auth switch --hostname github.com --user <origin-owner>` in the same
-     process, and verify `gh api user --jq .login`.
-  1. Check: run `uv run --script tools/coordinator-check.py`. When it prints
-     nothing and no child is waiting, end the tick silently.
-  2. Unblock: read session status; answer every owned child awaiting input or
-     plan approval within existing authority and resume interrupted children.
-     Investigate each `STALLED` worker. Escalate only new scope or authority,
-     with options and a recommendation.
-  3. Pull requests: for each PR the check reports ready, merge only a PR the
-     developer authorized, one head at a time with the full-SHA guard, then
-     read the result back; otherwise report it ready for review.
-  4. Runtime health: for reported runtime errors, query detail with
-     `agents-live logs --all --since 15m --errors`; investigate through a
-     delegate and never change the live runtime without authority.
-  5. Release state: when release-relevant state changed, run
-     `uv run --script tools/release-report.py` and note changes in readiness,
-     blockers or next action.
-  6. Cleanup: archive finished owned children (see below), preserving needed
-     artifacts first. Remove only clean worktrees the check reports as
-     `HYGIENE`, without `--force`.
-  7. Report: message the creator only when something changed or needs a
-     decision, in plain language. Silence is fine on a no-change tick.
 - **Start a background worker as a child session.** For any slice longer than
   a few minutes (implementation, a test run, RC preparation or an
   investigation):
@@ -184,8 +193,8 @@ or app child sessions. They add no commit, merge, release or runtime authority.
      return: changed paths, check results, blockers and next action. Every
      brief also says, in its own words, never to use `ask_user` or any question
      form and to send decisions to the coordinator with `send_message` while
-     continuing other work: a pending form blocks the worker and also blocks
-     the coordinator's steering messages from reaching it.
+     continuing other work: a pending form blocks the worker and the
+     coordinator's steering messages from reaching it.
      Put longer standing detail in a gitignored file the prompt points to.
   3. Read the session back to confirm its model and working directory; a
      session that failed startup is recreated, not revived by message.
@@ -203,8 +212,8 @@ or app child sessions. They add no commit, merge, release or runtime authority.
   with the log in a gitignored location. It prints the process ID and returns
   at once; on Windows neither the command nor anything it starts opens a
   window. Without `--detach` it waits and relays the output and exit code.
-  Use in-session task subagents only for short, bounded checks whose verdict
-  is all that matters.
+  Use in-session task subagents only for short checks whose verdict is all
+  that matters.
 - **Restart a hung coordinator; do not retry it.** If every tool call in a
   coordinator session hangs, including trivial reads, searches and session
   creation, the session itself is the fault. Stop retrying, record the state
@@ -212,26 +221,13 @@ or app child sessions. They add no commit, merge, release or runtime authority.
   session resumes from the prior session's record (its handoff, open PRs,
   worktrees and the check's state), not from a rebuilt plan.
 - **When blocked, ask and keep moving.** A coordinator or worker that is
-  blocked does two things at once. It posts an ASK on the cross-team
-  coordination issue, naming its role and asking the other coordinators for
-  unblocking strategies, with no private content. Meanwhile it switches to
-  other authorized, unblocked work so progress continues. It never sits idle
-  waiting for an answer.
+  blocked requests unblocking strategies through the cross-team coordination
+  issue, with no private content. Meanwhile it switches to other authorized,
+  unblocked work rather than waiting idle.
 - **Run the heartbeat as its own worker.** Use a same-session automation where
-  the harness offers one. Otherwise start a `Heartbeat` child session whose
-  only job is to run `uv run --script tools/coordinator-check.py` about every
-  10 minutes and also read the cross-team coordination issue for new posts
-  from other coordinators. It messages the coordinator only when the check
-  prints something or the issue has a new post. For the issue read it keeps a
-  high-water mark taken from the newest comment it actually saw, not from the
-  clock, and treats a comment as new when either its created or its updated
-  time is past that mark. It excludes only its own coordinator's posts, and it
-  flags a coordinator posting for the first time and any ask addressed to all
-  coordinators. It also flags any child chat in the input-needed state, and any
-  idle child chat that has not reported an outcome, blocker or decision. It
-  never acts and never posts to the issue; to change what it checks, change the
-  script.
-  Retire it when the goals are met.
+  the harness offers one. In other harnesses, start a `Heartbeat` child session
+  with the same check, issue and child-state responsibilities above, about
+  every 10 minutes. Retire it when the goals are met.
 - **Name the workspace in every brief.** State the exact worktree and tested
   head the delegate may read, edit or test, and the excluded locations (for
   example the primary checkout and the live runtime). Repeat the repository's
@@ -241,17 +237,17 @@ or app child sessions. They add no commit, merge, release or runtime authority.
   approvals. Answer them within the developer's goals and recorded authority,
   give a next action, and escalate to the developer only a genuinely new
   authority or scope decision, framed with options and a recommendation.
-- **Replace a child stuck on a form.** A child waiting on a question form
-  cannot receive steering. Do not wait for it. First preserve its handoff,
-  local edits, unpushed commits and any scratch a successor needs. Then stop
-  its turn (archiving the chat is fine) and start a replacement whose brief
-  embeds the decision and points to the preserved work. Keep the stuck child's
-  worktree and branch until the close-out conditions below are met; being
-  stuck never justifies tearing down a dirty or work-owning child.
+- **Replace a child stuck on a question form.** A child waiting on a question
+  form cannot receive steering. Do not wait for it. First preserve its handoff,
+  local edits, unpushed commits and needed scratch. Stop its turn and start a
+  replacement whose brief includes the decision and points to the preserved
+  work. Keep the original child's worktree and branch until normal close-out
+  conditions are met.
 - **Children report only on outcomes.** Brief each child to message its
   supervisor only at a merge-ready result, a blocker or a decision it cannot
-  make, never through a blocking dialog, and to state its next action whenever
-  it pauses. Progress between those points is visible to the check.
+  make, never through a blocking dialog or question form, and to state its next
+  action whenever it pauses. Use `send_message` for decisions so a pending form
+  cannot block steering. Progress between those points is visible to the check.
 - **Carry plan conditions into review.** When approving a child's plan with
   conditions, copy them verbatim into the reviewer's or tester's brief as
   pass/fail checks.
@@ -268,7 +264,13 @@ or app child sessions. They add no commit, merge, release or runtime authority.
   archive its child); never remove an app-managed worktree by hand. Remove
   app-created worktrees that share `main` as soon as the release step that
   created them finishes; advancing `main` otherwise leaves their working tree
-  stale with phantom reverse-staged changes.
+  stale with phantom reverse-staged changes. On Windows, `git worktree remove`
+  can finish Git teardown but fail to remove an empty folder held open by
+  another process. Verify the registration is absent from `git worktree list`,
+  verify the local branch is gone when deletion was intended, and verify the
+  remaining folder is empty. If those checks pass, Git close-out is complete;
+  remove the residual folder later when its handle is released. Do not force
+  removal or terminate an unrelated process to hide the warning.
 
 ## Commit hygiene
 
@@ -280,12 +282,25 @@ without approval, and do not add synchronization merge commits. Fast-forward a
 clean primary checkout after verifying the merged commit is reachable from
 `origin/main`.
 
-Before GitHub writes, check the authenticated login and repository permission.
-With multiple accounts, use an owner credential scoped to the command process;
-never print tokens or switch the shared active account while other agents work.
-Preserve and restore any existing credential environment variable in `finally`.
-Use a full tested head SHA with guarded merges. Fetch and report a moved head
-instead of merging a different revision silently.
+Before each `gh` write, clear `GH_TOKEN` and `GITHUB_TOKEN`, switch to the
+repository owner's account and verify `gh api user --jq .login` in the same
+process as the write, following [AGENTS.md](../AGENTS.md#rules). Never print
+tokens. For a Git push, use the owner's credential only in the push process.
+If needed, obtain it with `gh auth token --user <origin-owner>` after verifying
+the owner login, then set `GH_TOKEN` only for the push process and clear
+`GITHUB_TOKEN`. If using `gh auth git-credential`, an inherited
+`GIT_CONFIG_PARAMETERS` can override a generic helper reset; clear it and use
+two process-scoped URL-specific helper entries, the first empty to reset the
+list and the second `!gh auth git-credential`. Do not change shared Git
+configuration. In PowerShell, pass issue and PR bodies with `--body-file` when
+inline quoting may alter their contents.
+
+Use the full 40-character tested head SHA with guarded merges. Check that the
+merge succeeded before cleanup, then verify the merged commit is reachable
+from `origin/main` with `git merge-base --is-ancestor`. The repository may
+delete the remote head branch automatically; a later remote-delete failure
+does not undo a successful merge. Fetch and report a moved head instead of
+merging a different revision silently.
 
 Keep PowerShell validation scripts fail-fast: capture `$LASTEXITCODE` immediately
 after the native command and propagate it before formatting or another command
@@ -344,443 +359,4 @@ private source repository is retired. Consumer repositories receive the skill
 payload through `agents-live init`/`upgrade`; never treat an installed payload
 as a source checkout or propose back-porting changes into one.
 
-<!-- glp-update:v1 id=c90f511b-cf45-4dac-a71d-bd556d82e313 -->
-<a id="glp-c90f511b-cf45-4dac-a71d-bd556d82e313"></a>
-### GLP Update: Select the repository owner account before each gh sequence
-
-- Update-ID: c90f511b-cf45-4dac-a71d-bd556d82e313
-- Recorded-UTC: 2026-10-08T14:21:29Z
-- Kind: correction
-- Topics: github-cli, credentials, gh auth switch, GH_TOKEN, issue creation
-- Workstream: 6.9.4rc5 (#565) orchestration
-- Target: .agents/development.md, Commit hygiene; compared origin/main dccdc4b
-- Source-Session: CDL session 2026-10-08 (local log only)
-- Evidence-Basis: mixed
-- Application: applied
-- Consolidation: pending
-
-#### Change
-The developer directed that every `gh` command sequence start by switching to
-the repository owner account (`gh auth switch --user <owner>`). A `GH_TOKEN`
-(or `GITHUB_TOKEN`) environment
-variable overrides the switch, so clear it in the command process first. When
-the in-app issue tool returns 403 for an Enterprise Managed User, file the issue
-with `gh` under the owner account instead of retrying the tool.
-
-#### Evidence
-- User direction, 2026-10-08: start each gh command sequence by switching to
-  the right user, naming the repository owner account.
-- Observed 2026-10-08: the issue tool and `gh issue create` returned "As an
-  Enterprise Managed User, you cannot access this content"; `gh auth switch`
-  then printed that the `GH_TOKEN` value was being used. After removing
-  `GH_TOKEN` in the process and switching, `gh issue create` filed #566.
-
-#### Previous Knowledge
-Commit hygiene above says to use an owner credential scoped to the command
-process and never switch the shared active account while other agents work.
-This user direction supersedes the "never switch" clause for this repository.
-Process-scoped token removal remains required; do not print tokens.
-
-#### Verification and Limits
-Verified once by filing #566. `gh auth switch` changes the shared active
-account for every process on the host, so a concurrent agent that expects a
-different account may be affected; the developer accepted this by directing
-the switch. Whether the switch should be undone afterwards is unknown.
-
-#### Follow-up
-Fold into Commit hygiene at the next consolidation of this document.
-<!-- /glp-update:v1 id=c90f511b-cf45-4dac-a71d-bd556d82e313 -->
-
-<!-- glp-update:v1 id=7dcc21e7-7a86-4cd9-89e5-480ca755c02e -->
-<a id="glp-7dcc21e7-7a86-4cd9-89e5-480ca755c02e"></a>
-### GLP Update: Pin the owner token per process; the active gh account can be reverted
-
-- Update-ID: 7dcc21e7-7a86-4cd9-89e5-480ca755c02e
-- Recorded-UTC: 2026-10-08T23:35:44Z
-- Kind: correction
-- Topics: github-cli, credentials, gh auth switch, GH_TOKEN, git push, PowerShell quoting
-- Workstream: 6.9.4rc5/rc6 release operations
-- Target: .agents/development.md, Commit hygiene; compared origin/main 3733230
-- Source-Session: CDL session 2026-10-08 (local log only)
-- Evidence-Basis: mixed
-- Application: applied
-- Consolidation: pending
-
-#### Change
-`gh auth switch` changes shared host state and was observed to be reverted by a
-concurrent process during 6.9.4rc5/rc6 work, so switching alone is unreliable.
-In each command process, clear `GITHUB_TOKEN` and set `GH_TOKEN` from
-`gh auth token --user <owner>` without printing the token. Push with the
-process-scoped credential helper
-`git -c credential.helper= -c "credential.helper=!gh auth git-credential" push ...`.
-Pass issue and PR bodies through `--body-file` using a temporary file because
-inline PowerShell quoting broke bodies.
-
-#### Evidence
-- Observed 2026-10-08: repeated EMU 403s after switching; pinning the token
-  worked for PRs #570, #571, #573, #575 and #576, and issues #572 and #574.
-- Observed 2026-10-08: inline PowerShell body quoting failed; using a temporary
-  file with `--body-file` avoids that quoting path.
-
-#### Previous Knowledge
-The preceding [GLP update](#glp-c90f511b-cf45-4dac-a71d-bd556d82e313) says to
-clear `GH_TOKEN` before switching. This corrects that method: avoid shared
-account switching and pin the owner credential per process instead.
-
-#### Verification and Limits
-The process-scoped token approach succeeded for the listed GitHub writes.
-Tokens were not printed. This evidence does not establish behavior for other
-credential providers or shells.
-
-#### Follow-up
-Fold into Commit hygiene at the next consolidation of this document.
-<!-- /glp-update:v1 id=7dcc21e7-7a86-4cd9-89e5-480ca755c02e -->
-
-<!-- glp-update:v1 id=49387356-34c6-4342-aa9c-8354137ae10e -->
-<a id="glp-49387356-34c6-4342-aa9c-8354137ae10e"></a>
-### GLP Update: Merge with the full head SHA and guard branch cleanup on merge success
-
-- Update-ID: 49387356-34c6-4342-aa9c-8354137ae10e
-- Recorded-UTC: 2026-10-08T23:35:44Z
-- Kind: lesson
-- Topics: pull requests, merge, head SHA, branch cleanup
-- Workstream: 6.9.4rc5/rc6 release operations
-- Target: .agents/development.md, Commit hygiene; compared origin/main 3733230
-- Source-Session: CDL session 2026-10-08 (local log only)
-- Evidence-Basis: observed
-- Application: applied
-- Consolidation: pending
-
-#### Change
-`gh pr merge --match-head-commit` requires the full 40-character SHA. A short
-SHA failed the merge, and chained cleanup then deleted the head branch and
-closed PR #571; the branch had to be restored and the PR reopened. Check the
-merge exit code, then verify the head commit is reachable from `origin/main`
-with `git merge-base --is-ancestor` before deleting worktrees or branches. The
-repository may already delete the remote head branch on merge, so a subsequent
-failed remote delete is expected.
-
-#### Evidence
-- Observed during PR #571 on 2026-10-08: the short SHA merge failed and the
-  chained cleanup deleted the branch; restoration and reopening were required.
-
-#### Previous Knowledge
-Commit hygiene already requires a full tested head SHA and guarded merges. This
-adds the specific 40-character requirement, cleanup ordering, reachability
-check, and expected remote-branch deletion behavior.
-
-#### Verification and Limits
-The PR #571 merge was completed after restoring the branch and reopening the
-PR. The exact cleanup outcome can vary when the repository deletes remote
-branches automatically.
-
-#### Follow-up
-Fold into Commit hygiene at the next consolidation of this document.
-<!-- /glp-update:v1 id=49387356-34c6-4342-aa9c-8354137ae10e -->
-
-<!-- glp-update:v1 id=b617d870-e34d-43e9-93a8-a8a30740e229 -->
-<a id="glp-b617d870-e34d-43e9-93a8-a8a30740e229"></a>
-### GLP Update: Orchestrator practices for delegates and child sessions
-
-- Update-ID: b617d870-e34d-43e9-93a8-a8a30740e229
-- Recorded-UTC: 2026-10-09T14:30:54Z
-- Kind: addition
-- Topics: orchestration, delegation, child sessions, steerability, review briefs, session teardown
-- Workstream: orchestrator ideas adoption
-- Target: .agents/development.md, Orchestrating delegates and child sessions; AGENTS.md, Load before acting; compared origin/main fc669cf
-- Source-Session: Copilot app session 2026-10-09 (harness history)
-- Evidence-Basis: mixed
-- Application: applied
-- Consolidation: pending
-
-#### Change
-Added a section covering seven orchestrator practices: stay steerable by running
-long work asynchronously; attach one 11-minute self-wake automation with a fixed
-step list while coordinating active work; name the exact workspace, head and excluded locations
-in every brief and verify the delegate's real working directory; answer child
-questions and plan approvals within existing authority instead of stalling;
-copy plan-approval conditions into review briefs as pass/fail checks; treat a
-pass as valid only for the tested head and merge serially with readback; and
-close out finished children through the harness lifecycle after preserving
-needed scratch.
-
-#### Evidence
-- User direction, 2026-10-09: read a notes repository maintained by the
-  developer for orchestrator guidance and incorporate useful ideas here.
-- A reviewed method-learning comparison with that repository on 2026-10-09.
-  Its practices rest on its own provisional observations; none was re-observed
-  in this repository before adoption. No private source text or identity was
-  copied.
-
-#### Previous Knowledge
-CDL supervision and this guide already covered delegate briefs, compact
-reports, a reusable RC tester, single ownership of live runtime mutation, gate
-reuse and full-SHA guarded merges. AGENTS.md already covered handoff content,
-plain-language reporting and decision framing. The new section refines those
-rules without duplicating them.
-
-#### Verification and Limits
-Documentation only. Checked by the pre-release audit and `git diff --check`.
-No behavioral acceptance is claimed. Rejected for this repository: a
-direct-commit review cursor, deploy-range authorization and a separate model
-table, because they target a different workflow or duplicate existing local
-rules. The developer first declined a periodic self-wake timer, then on
-2026-10-09 directed adding one modeled on the compared repository's
-orchestrator: a single 11-minute same-session automation with the step list
-above, minus steps specific to that repository. The first tick ran
-immediately after attachment and completed every step.
-
-#### Follow-up
-Mark each practice confirmed after a later orchestration here follows it
-successfully; fold this block at the next consolidation of this document.
-<!-- /glp-update:v1 id=b617d870-e34d-43e9-93a8-a8a30740e229 -->
-
-<!-- glp-update:v1 id=7a98e19a-07e1-45d3-b1e8-4d92ae0f54c0 -->
-<a id="glp-7a98e19a-07e1-45d3-b1e8-4d92ae0f54c0"></a>
-### GLP Update: Override URL-specific app credential helpers for owner pushes
-
-- Update-ID: 7a98e19a-07e1-45d3-b1e8-4d92ae0f54c0
-- Recorded-UTC: 2026-10-09T15:20:18Z
-- Kind: correction
-- Topics: git push, credential helper, GIT_CONFIG_PARAMETERS, release publication
-- Workstream: 6.9.4 publication from RC6
-- Target: .agents/development.md, Commit hygiene; compared origin/main 0f0bf55
-- Source-Session: delegated release session report, 2026-10-09
-- Evidence-Basis: observation
-- Application: applied
-- Consolidation: pending
-
-#### Change
-An agent harness may inject a URL-specific `credential.https://github.com.helper`
-through inherited `GIT_CONFIG_PARAMETERS`. A generic `-c credential.helper=`
-override does not displace a URL-specific helper, so the push still uses the
-harness account. When an owner push must succeed, scope the fix to the push
-process: clear `GIT_CONFIG_PARAMETERS`, set `GIT_CONFIG_COUNT=2` with two
-`credential.https://github.com.helper` entries (the first empty to reset the
-list, the second `!gh auth git-credential`), and pin the owner `GH_TOKEN` as in
-the preceding update. Do not change shared Git configuration.
-
-#### Evidence
-- Observation, 2026-10-09: the 6.9.4 atomic stable push was refused under the
-  harness account despite owner-pinned `gh` and a generic helper override. No
-  tag or artifacts were published by the refused attempt.
-- Retrying the same finalized attempt with the process-scoped URL-specific
-  override succeeded; the stable commit and tag reached the remote and
-  publication completed without a rebuild.
-
-#### Previous Knowledge
-The [preceding GLP update](#glp-7dcc21e7-7a86-4cd9-89e5-480ca755c02e) pins the
-owner token and uses a generic process-scoped credential helper. That works
-only when no URL-specific helper is injected; this update extends it.
-
-#### Verification and Limits
-One observed failure and one successful retry, in one harness on Windows
-PowerShell. Tokens were not printed. Other harnesses may inject credentials
-differently.
-
-#### Follow-up
-Fold into Commit hygiene at the next consolidation of this document.
-<!-- /glp-update:v1 id=7a98e19a-07e1-45d3-b1e8-4d92ae0f54c0 -->
-
-<!-- glp-update:v1 id=d121e4f7-57ac-40d1-bfc7-deb5e459d511 -->
-<a id="glp-d121e4f7-57ac-40d1-bfc7-deb5e459d511"></a>
-### GLP Update: Windowless launcher, fresh sessions for hung coordinators and progress when blocked
-
-- Update-ID: d121e4f7-57ac-40d1-bfc7-deb5e459d511
-- Recorded-UTC: 2026-11-23T19:53:51Z
-- Kind: addition
-- Topics: orchestration, detached processes, hidden windows, coordinator recovery, blocked work, heartbeat
-- Workstream: worker-launch practices adoption
-- Target: .agents/development.md, Orchestrating delegates and child sessions; new tools/run-hidden.py; compared origin/main 43e70b5
-- Source-Session: Copilot app worker session 2026-11-23 (harness history)
-- Evidence-Basis: mixed
-- Application: applied
-- Consolidation: pending
-
-#### Change
-Long commands that need no reasoning run through `tools/run-hidden.py`, which
-starts a command with no visible window on Windows, optionally detached with a
-printed process ID and a log file, and relays output and exit code otherwise.
-When every tool call in a coordinator session hangs, the coordinator stops
-retrying and the developer starts a fresh coordinator session that resumes
-from the prior session's record. A coordinator or worker that is blocked asks
-the other coordinators for unblocking strategies on the cross-team coordination
-issue and meanwhile switches to other authorized, unblocked work. A heartbeat
-worker runs about every 10 minutes instead of every 15 to 20, and also reads
-the cross-team coordination issue, reporting only new posts. Its issue read
-tracks the newest comment it saw (created or updated time), excludes only its
-own coordinator's posts and flags new coordinators and asks to all
-coordinators.
-
-#### Evidence
-- User direction, 2026-11-23: the developer chose to adopt these two
-  worker-launch practices from another repository the developer maintains.
-  Only the launcher's process-creation behavior and the recovery rule were
-  adopted; that repository's process registry and other specific content were
-  not copied.
-- Observation, 2026-11-23: a coordinator session's tool calls, including
-  session creation and trivial searches, hung for hours. A fresh coordinator
-  session started both pending workers on the first try.
-- User direction, 2026-11-23, added to the same change: "if you gets blocked
-  you can talk to the other about good strategies to get unblocked and if you
-  do get blocked work on other works so you keep making progress".
-- User direction, 2026-11-23: "every 10 minutes might be better", confirmed
-  for all coordinators, with the heartbeat also reading the cross-team
-  coordination issue for new posts.
-- Observation, 2026-11-24: a heartbeat reported no new posts on the
-  coordination issue while six posts from other coordinators, including two
-  asks addressed to all coordinators, were unread. The developer directed the
-  high-water mark, created-or-updated check, own-posts-only exclusion and
-  flagging rules.
-
-#### Previous Knowledge
-The guide pointed long no-reasoning commands at the agent shell's async
-detached mode, which does not control console windows for the command's own
-children, and had no rule for a coordinator session whose tool calls all hang.
-The "Never stall a child" rule covered a supervisor answering its children, but
-not what a blocked coordinator or worker does with its own time.
-
-#### Verification and Limits
-Focused behavior tests cover output and exit-code relay, log appending,
-detached start with a printed process ID, usage and start errors, and the
-Windows creation flags. The hung-session rule rests on one observation; the
-cause of the hang was not diagnosed. The blocked-work rule is developer
-direction and has not yet been exercised here.
-
-#### Follow-up
-Fold into the orchestration guidance at the next consolidation of this document.
-<!-- /glp-update:v1 id=d121e4f7-57ac-40d1-bfc7-deb5e459d511 -->
-
-<!-- glp-update:v1 id=ec973a90-89d2-4005-949e-a3b106576e96 -->
-<a id="glp-ec973a90-89d2-4005-949e-a3b106576e96"></a>
-### GLP Update: No question forms in worker briefs, heartbeat flags waiting children, replace stuck children
-
-- Update-ID: ec973a90-89d2-4005-949e-a3b106576e96
-- Recorded-UTC: 2026-11-24T09:56:09Z
-- Kind: addition
-- Topics: orchestration, worker briefs, ask_user, heartbeat, child sessions
-- Workstream: developer-away guidance
-- Target: .agents/development.md, Orchestrating delegates and child sessions; compared origin/main 6a9a261
-- Source-Session: Copilot app worker session 2026-11-24 (harness history)
-- Evidence-Basis: mixed
-- Application: applied
-- Consolidation: pending
-
-#### Change
-Every worker brief states that the worker never uses `ask_user` or any
-question form and sends decisions to the coordinator with `send_message`. The
-heartbeat flags child chats in the input-needed state and idle child chats that
-have not reported. A coordinator replaces a child stuck on a form instead of
-waiting: it preserves the child's handoff, local edits, unpushed commits and
-needed scratch, stops its turn, and starts a fresh child whose brief embeds the
-decision. The stuck child's worktree and branch stay until the existing
-close-out conditions are met.
-
-#### Evidence
-- Observation, 2026-11-24: a release worker opened an `ask_user` form and
-  stalled for about two hours; the coordinator's steering message could not
-  reach it while the form was pending.
-- User direction, 2026-11-24: the developer chose to fold these three
-  coordinator lessons into this guide in the same change as the developer-away
-  guidance.
-
-#### Previous Knowledge
-The brief template already listed `ask_user` among banned actions, without the
-reason or the `send_message` alternative. The heartbeat read the check and the
-coordination issue but not child chat state, and "Never stall a child" assumed
-the supervisor could always answer a waiting child.
-
-#### Verification and Limits
-Documentation only. The heartbeat flags depend on the harness exposing child
-chat state; the check script does not read it.
-
-#### Follow-up
-Fold into the orchestration guidance at the next consolidation of this document.
-<!-- /glp-update:v1 id=ec973a90-89d2-4005-949e-a3b106576e96 -->
-
-<!-- glp-update:v1 id=c5cb9493-2d82-40f1-bd3c-e198ec5ef9cb -->
-<a id="glp-c5cb9493-2d82-40f1-bd3c-e198ec5ef9cb"></a>
-### GLP Update: Verify Git teardown before treating a held empty folder as failure
-
-- Update-ID: c5cb9493-2d82-40f1-bd3c-e198ec5ef9cb
-- Recorded-UTC: 2026-11-24T12:46:11Z
-- Kind: addition
-- Topics: close-out, Windows worktrees, cleanup, permission denied
-- Workstream: 6.9.5rc4 incident and rc5 close-out
-- Target: .agents/development.md, Orchestrating delegates and child sessions, Close out finished children; compared origin/main 8c90b97fd499398bcc708f0890eb304137927e1b
-- Source-Session: coordinator close-out observations, 2026-11-24
-- Evidence-Basis: observation
-- Application: applied
-- Consolidation: pending
-
-#### Change
-On Windows, `git worktree remove` can leave an empty folder held open by another
-process and report "permission denied" after Git teardown has succeeded.
-Verify the worktree registration is absent with `git worktree list`, verify
-the local branch is gone when its deletion was intended, and verify the remaining
-folder is empty. If those checks pass, Git close-out is complete; delete the
-residual folder later when its handle is released. Do not force removal or
-terminate an unrelated process to hide the warning.
-
-#### Evidence
-Coordinator observation, 2026-11-24: Windows cleanup left an empty held folder
-with "permission denied", while the Git registration and local branch were gone.
-The folder could be deleted later.
-
-#### Previous Knowledge
-Close out finished children defines safe teardown and protects app-managed
-worktrees. It does not distinguish completed Git teardown from delayed filesystem
-cleanup. Those ownership and clean-worktree prerequisites still apply.
-
-#### Verification and Limits
-The supplied observation is not reproduced by this docs pass. A permission
-error alone is not success: remaining registration, branch or files require
-investigation, and branch removal is a separate check.
-
-#### Follow-up
-Fold into close-out guidance at a separately scoped consolidation.
-<!-- /glp-update:v1 id=c5cb9493-2d82-40f1-bd3c-e198ec5ef9cb -->
-
-<!-- glp-update:v1 id=9ce30ac0-4b6a-4cee-b85a-3bcccf32ce8a -->
-<a id="glp-9ce30ac0-4b6a-4cee-b85a-3bcccf32ce8a"></a>
-### GLP Update: Simplify a failing design before layering another workaround
-
-- Update-ID: 9ce30ac0-4b6a-4cee-b85a-3bcccf32ce8a
-- Recorded-UTC: 2026-11-24T12:46:11Z
-- Kind: addition
-- Topics: design simplification, corrective fixes, native boundaries, regression evidence
-- Workstream: Windows clock-trigger correction in PR #631
-- Target: .agents/development.md, Conventions; compared origin/main 8c90b97fd499398bcc708f0890eb304137927e1b
-- Source-Session: PR #631 design evidence review, 2026-11-24
-- Evidence-Basis: observation
-- Application: applied
-- Consolidation: pending
-
-#### Change
-When a fix needs a second fix, first reconsider and simplify its design rather
-than layering another workaround. Remove machinery made unnecessary by the
-simpler model, then verify the observable result at the real boundary.
-Preserve required behavior and validation; fewer paths alone do not prove correctness.
-
-#### Evidence
-[PR #631](https://github.com/johnshew/agents-live/pull/631), observed
-2026-11-24, replaced the 24 hourly-trigger design with a UTC-anchored repeating
-trigger for regular schedules and removed its cap and simulator paths.
-An executing native launch check replaced simulation as evidence that the
-registered schedule actually launches. Irregular schedules still require
-multiple exact arithmetic runs.
-
-#### Previous Knowledge
-Conventions already requires minimal diffs; [testing.md, What deserves a
-test](testing.md#what-deserves-a-test) requires real boundary evidence.
-Neither explicitly says to reassess the design when a corrective fix itself
-needs correction. This is a method lesson, not a new trigger-count guarantee.
-
-#### Verification and Limits
-The incident and PR #631 support this example. The PR also retained native
-platform limits; simplification does not authorize removing necessary limits
-or changing unrelated behavior.
-
-#### Follow-up
-Fold into development conventions at a separately scoped consolidation.
-<!-- /glp-update:v1 id=9ce30ac0-4b6a-4cee-b85a-3bcccf32ce8a -->
+<!-- GLP consolidation: 2026-11-26T16:11:04Z; base=4cdf0fbad92c9ae9d3ddc1952ba8d9d435c79c1a -->
