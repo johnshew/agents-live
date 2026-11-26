@@ -1,7 +1,7 @@
 ---
 title: Architecture
 description: Runtime, agent, dispatch, state, and observability seams
-ms.date: 2026-10-09
+ms.date: 2026-11-26
 ms.topic: concept-article
 ---
 
