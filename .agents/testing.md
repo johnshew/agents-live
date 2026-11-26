@@ -9,8 +9,8 @@ The smoke suite is the backbone: it drives the full chain (create,
 frontmatter, dispatch, watcher detect, stop) against temp
 projects. Add a focused test beside it only when a failure would be
 high-impact and either silent or combinatorial beyond what the smoke
-suite can enumerate (flag matrices, format parsing, error
-classification clear that bar).
+suite can enumerate (flag matrices, format parsing, or error
+classification that clears that bar).
 
 Do not add unit tests against internal function signatures or for
 small one-caller helpers - they freeze implementation details
@@ -26,6 +26,20 @@ Drive the real boundary and assert the observable outcome rather than source
 text or a mocked translation. Before keeping a regression test, demonstrate
 that it fails when its fix is absent; a test that stays green does not guard
 the defect.
+
+Before changing shutdown or replacement behavior, trace every launch origin
+through dispatch to the process that owns its run lock. Test standalone work
+and work dispatched inside a resident process, including launcher and child
+ancestry; excluding a command-line `run` path does not prove that stopping a
+watcher leaves its in-process work alive.
+
+For lifecycle handoffs, exercise a competing owner acquiring work after a plan
+but before mutation. Test ownership gates on every launch path and recheck
+ownership immediately before committing a change. Verify eventual convergence
+and cleanup of duplicates created by older behavior. Distinguish logical watch
+loops from launcher and child process rows; when stable launcher fingerprints
+cannot identify a runtime generation, use interpreter identity. Keep negative
+probes harmless even if their guard fails.
 
 When a defect comes from observed use, reduce the observed input to a sanitized
 fixture that preserves the causal property and drive it through the owning code.
@@ -61,6 +75,15 @@ Final packaging failures must preserve an attempt-specific record and allow
 safe recovery without overwriting sealed installations or consuming the next
 stable version. Publication must upload exactly the retained stable bytes,
 bound to the RC approval, without rebuilding or executing them.
+
+For changes to schedule registration, isolated readiness, trigger readback,
+doctor, and acceptance do not prove that the activated runtime launches its
+scheduled tasks. After activation, perform the [post-activation launch
+check](release.md#glp-bddde36b-b5e5-4222-b510-c390a4564685): observe the next
+two 5-minute maintenance launches and a clock agent at its due minute, correlate
+Windows Task Scheduler `LastRunTime` and `LastTaskResult` with
+`agents-live logs timeline`, and roll back if a required launch is more than
+2 minutes late. The 6.9.5rc4 incident demonstrated this gap ([#630](https://github.com/johnshew/agents-live/issues/630)).
 
 Preparation and acceptance receipts bind attempt, source and metadata commits,
 gate commands, environment, artifact hashes, and each other. `--cycle-status`
@@ -125,15 +148,18 @@ Use `--plan` to inspect a profile without running checks.
 
 On Windows, packaged dashboard readiness also runs the candidate's native clock
 check before starting the server. It registers isolated `PT9M` and `PT12H` triggers
-with expected local launches at least one full minute ahead. The second trigger
-starts yesterday at its upcoming minute to exercise the next daily cycle. It
-verifies timestamp actions and UTC/offset readback, watches the full 30-second
-launch window for duplicates, then deletes the probe tasks and folder. Launches must occur
-within 30 seconds of their expected minutes; the deadline follows the last anchor
-by 45 seconds. Registration and observed launch times are reported for each task.
-A schedule that never launches fails readiness in under four minutes. The source seam suite runs
-the same check on Windows and skips it elsewhere; neither check touches the live
-task folder.
+with at least a full minute before their expected local launch. Finish probe setup
+before choosing anchors. The `PT12H` trigger is anchored to yesterday so the probe
+observes the next daily repetition without waiting a day. Verify timestamp actions
+and UTC/offset readback, observe launches beyond the first daily cycle, report
+every observed timestamp including duplicates and wrong-minute launches, then
+delete the probe tasks and folder. Each expected launch must occur within
+30 seconds of its expected minute; a late launch at the wrong minute is not a
+pass. The deadline follows the last anchor by 45 seconds. Allow enough setup and
+polling time for slow CI without weakening the expected-minute check. A schedule
+that never launches fails readiness in under four minutes. The source seam suite
+runs the same check on Windows and skips it elsewhere; neither check touches the
+live task folder.
 
 Receipts live under the common Git directory, outside the exported tree. They
 record command arguments, exit codes, durations, commit and source digest,
@@ -531,6 +557,17 @@ compatibility. `doctor` reports a package and payload version mismatch. GitHub
 repository notifications can provide proactive release notices: select
 **Watch**, **Custom**, then **Releases**.
 
+When measuring an installed command, invoke the selected installation's launcher
+by absolute path and record its `--version` with each measurement. An activated
+environment can leave another executable earlier on `PATH`; unsetting
+`VIRTUAL_ENV` alone does not establish which command ran. For performance
+investigations, profile the real command on the affected host before changing
+code. Use `cProfile` through `uv run --with-editable .` for source profiling,
+and repeat timing with declared-plugin loading disabled to separate plugin
+startup cost from Agents Live runtime cost. A 2026-10-29 timing review exposed
+both a stale `PATH` entry and substantial declared-plugin import time; see
+[#604](https://github.com/johnshew/agents-live/issues/604).
+
 If bare `agents-live` resolves to an editable or package-manager environment,
 run the verified bootstrap before testing consumer behavior:
 
@@ -640,232 +677,4 @@ Then compare bare `agents-live` with the explicit editable-source command. The
 two should report different versions whenever the checkout is ahead of the
 latest PyPI release.
 
-<!-- glp-update:v1 id=e8d943e1-f4f1-4de2-8eab-0be145b5ba39 -->
-<a id="glp-e8d943e1-f4f1-4de2-8eab-0be145b5ba39"></a>
-### GLP Update: Trace in-flight work to its owning process before changing shutdown
-
-- Update-ID: e8d943e1-f4f1-4de2-8eab-0be145b5ba39
-- Recorded-UTC: 2026-10-08
-- Kind: correction
-- Topics: activation, watcher-lifetime, process-tree, regression-testing
-- Workstream: activation with in-flight runs (#574)
-- Target: What deserves a test; compared b500b73
-- Source-Session: #574 source review, 2026-10-08 (harness history)
-- Evidence-Basis: observed
-- Application: applied
-- Consolidation: pending
-
-#### Change
-Before relaxing a shutdown refusal, trace every launch origin through dispatch
-and identify the process that owns its run lock. Test both standalone work and
-work executing inside a resident process, including launcher/child ancestry.
-Removing a command-line `run` exclusion does not prove that watcher termination
-leaves agent work alive.
-
-#### Evidence
-Independent review of b500b73 found that watch fires call dispatch in-process.
-RC4 source dccdc4b checks pause and generation replacement only between fires.
-The busy-watcher preservation and deferred-replacement regressions failed before
-the correction. The executing watcher regression then verified completion
-recording, no subsequent old-loop poll, and handoff after pause had cleared.
-
-#### Previous Knowledge
-This guide required real side-effect boundaries and eventual recovery, but the
-activation checks exercised standalone runs rather than watcher-owned dispatch.
-
-#### Verification and Limits
-Source fixtures simulate process ownership and run an actual watch loop with a
-fake provider. They do not establish installed-runtime or native-provider acceptance.
-
-#### Follow-up
-Consolidate this method correction into the testing policy during a separately
-authorized consolidation pass.
-<!-- /glp-update:v1 id=e8d943e1-f4f1-4de2-8eab-0be145b5ba39 -->
-
-<!-- glp-update:v1 id=35c61767-9990-4e35-bb6a-467a56ff8633 -->
-<a id="glp-35c61767-9990-4e35-bb6a-467a56ff8633"></a>
-### GLP Update: Exercise competing owners at the plan-to-spawn boundary
-
-- Update-ID: 35c61767-9990-4e35-bb6a-467a56ff8633
-- Recorded-UTC: 2026-10-08T22:38:04Z
-- Kind: addition
-- Topics: watcher-handoff, convergence, races, process-inventory
-- Workstream: activation with in-flight runs (#574)
-- Target: What deserves a test; compared 3ff94e3
-- Source-Session: #574 independent re-review, 2026-10-08 (harness history)
-- Evidence-Basis: observed
-- Application: applied
-- Consolidation: pending
-
-#### Change
-Test a second actor acquiring ownership after planning but before a mutation.
-Verify the gate around both launch paths, fresh ownership checks, and eventual
-repair of duplicates created by older code. Distinguish logical watch loops from
-launcher/child process rows and use interpreter generation identity when shared
-stable-launcher fingerprints cannot distinguish old and selected runtimes.
-
-#### Evidence
-Re-review of 3ff94e3 identified an ungated old-watcher handoff competing with
-prepared maintenance. RC4 source dccdc4b spawns through the stable launcher from
-its own old handoff function. Negative executing probes failed without gate and
-owner checks, duplicate cleanup, selected-target capture, or generation preference.
-The native-inventory fixture retains one selected-generation launcher/child tree,
-preserves a busy old tree, and retires it after its lock clears.
-
-#### Previous Knowledge
-The preceding process-ownership correction covered resident work and safe
-shutdown but did not exercise competing replacement actors between plan and
-commit or distinguish duplicate loops from rows belonging to one native tree.
-
-#### Verification and Limits
-The fixtures execute watch-loop retirement, maintenance commit, and native
-command-line projection through an isolated host. Final positive source gates
-follow this append; no installed-runtime or native-provider acceptance is claimed.
-
-#### Follow-up
-Fold this addition and the preceding correction into the testing policy during a
-separately authorized consolidation pass.
-<!-- /glp-update:v1 id=35c61767-9990-4e35-bb6a-467a56ff8633 -->
-
-<!-- /glp-update:v1 id=35c61767-9990-4e35-bb6a-467a56ff8633 -->
-
-<!-- glp-update:v1 id=5543f6ff-7b34-42f7-93b2-c60ee1039247 -->
-<a id="glp-5543f6ff-7b34-42f7-93b2-c60ee1039247"></a>
-### GLP Update: Name the timed runtime and profile the real configuration
-
-- Update-ID: 5543f6ff-7b34-42f7-93b2-c60ee1039247
-- Recorded-UTC: 2026-10-29T05:22:31Z
-- Kind: addition
-- Topics: performance measurement, installed runtime identity, plugins, profiling
-- Workstream: dashboard and status responsiveness (#601, #602, #603)
-- Target: .agents/testing.md; compared origin/main 7743abd
-- Source-Session: CDL session 2026-10-29 (local log only)
-- Evidence-Basis: observation
-- Application: applied
-- Consolidation: pending
-
-#### Change
-Before timing an installed command, invoke the selected installation's launcher
-by absolute path and record its `--version` output with every measurement. An
-editor terminal can carry an activated virtual environment whose `Scripts` or
-`bin` directory precedes the installed launcher on `PATH`, and unsetting
-`VIRTUAL_ENV` does not remove it. For performance work, profile the real
-command on the affected host (`cProfile` through `uv run --with-editable .`)
-before changing code. Repeat the measurement with declared-plugin loading
-disabled, so a plugin's own import cost is separated from Agents Live cost.
-
-#### Evidence
-- Observation: a baseline labelled "installed" ran an older 6.8.0 from a
-  stale virtual environment on `PATH` while the selected runtime was 6.9.5rc1.
-  The comparison was wrong until `Get-Command -All` and `--version` exposed it,
-  and the generated release report also showed the stale version as the local
-  selection.
-- Observation: on the affected host, about 6.5s of an 8.5s `status` was one
-  declared plugin's import. `status --all-repos` took 10.2s with plugins and
-  2.2s without, with identical output. Earlier source-only timing on another
-  host had not shown this.
-
-#### Previous Knowledge
-This guide separates source, wheel and installed execution modes, but it did
-not require proving which executable a timing used or separating plugin cost.
-
-#### Verification and Limits
-Two observations in one session on one Windows host. #604 tracks the runtime
-side of slow plugins.
-
-#### Follow-up
-Fold into the installed-runtime measurement guidance at the next consolidation.
-<!-- /glp-update:v1 id=5543f6ff-7b34-42f7-93b2-c60ee1039247 -->
-
-<!-- glp-update:v1 id=91842652-a9a3-4ef0-b171-3f585c1153d4 -->
-<a id="glp-91842652-a9a3-4ef0-b171-3f585c1153d4"></a>
-### GLP Update: Passing registration checks do not prove live scheduled launches
-
-- Update-ID: 91842652-a9a3-4ef0-b171-3f585c1153d4
-- Recorded-UTC: 2026-11-24T12:46:11Z
-- Kind: addition
-- Topics: test boundaries, native scheduling, installed RC, operational evidence
-- Workstream: 6.9.5rc4 incident and rc5 evaluation
-- Target: .agents/testing.md, Test boundaries and Deploy a numbered RC locally; compared origin/main 8c90b97fd499398bcc708f0890eb304137927e1b
-- Source-Session: incident and RC5 worker evidence review, 2026-11-24
-- Evidence-Basis: observation
-- Application: applied
-- Consolidation: pending
-
-#### Change
-Doctor, trigger readback and isolated acceptance are not evidence that the
-activated runtime's scheduled tasks launch. For schedule-registration changes,
-perform the [post-activation launch check](release.md#glp-bddde36b-b5e5-4222-b510-c390a4564685):
-the next two 5-minute maintenance launches and one clock agent at its due minute,
-using Task Scheduler `LastRunTime`/`LastTaskResult` and
-`agents-live logs timeline`, with rollback if a launch is more than 2 minutes late.
-Keep that live evidence separate from the isolated native packaged-readiness check.
-
-#### Evidence
-- [#630](https://github.com/johnshew/agents-live/issues/630), observed
-  2026-11-24: RC4 passed doctor, readback and isolated acceptance, but no
-  Windows scheduled task launched.
-- [#631](https://github.com/johnshew/agents-live/pull/631) added an executing
-  native clock check to packaged readiness.
-- RC5 worker report, 2026-11-24: both required maintenance launches and the
-  clock-agent launch started within 2 seconds of their due minute.
-
-#### Previous Knowledge
-Test boundaries already distinguish source, artifact and installed behavior;
-Validate the current checkout describes the native packaged check. This adds
-the missing live scheduled-launch evidence after activation, not a replacement gate.
-
-#### Verification and Limits
-Reported incident and worker outcomes were reviewed; this documentation pass
-does not mutate the runtime, repeat RC acceptance or establish publication approval.
-
-#### Follow-up
-Fold the boundary distinction and release-guide link into this guide at consolidation.
-<!-- /glp-update:v1 id=91842652-a9a3-4ef0-b171-3f585c1153d4 -->
-
-<!-- glp-update:v1 id=8875d9d8-1e2e-4ef4-a5e7-3be07111b28e -->
-<a id="glp-8875d9d8-1e2e-4ef4-a5e7-3be07111b28e"></a>
-### GLP Update: Native timing probes must cross the daily repetition boundary
-
-- Update-ID: 8875d9d8-1e2e-4ef4-a5e7-3be07111b28e
-- Recorded-UTC: 2026-11-24T12:46:11Z
-- Kind: addition
-- Topics: native timing, repetition endpoint, probe setup, CI timing, launch evidence
-- Workstream: Windows clock-check review in PR #631
-- Target: .agents/testing.md, Validate the current checkout; compared origin/main 8c90b97fd499398bcc708f0890eb304137927e1b
-- Source-Session: PR #631 review corrections, observed 2026-11-24
-- Evidence-Basis: observation
-- Application: applied
-- Consolidation: pending
-
-#### Change
-Observe native launches past the first day boundary, not just the first day's
-launch. An isolated trigger anchored yesterday can exercise the next daily cycle
-without a day-long wait. Finish prerequisite setup before choosing anchors and
-reserve explicit lead time for registration. Report every observed launch time,
-including duplicates and wrong-minute launches. Allow slow CI setup and polling
-through suitable lead time and deadlines, without relaxing the expected-minute
-assertion or treating a late wrong-minute launch as success.
-
-#### Evidence
-[PR #631](https://github.com/johnshew/agents-live/pull/631), observed
-2026-11-24: the inclusive repetition endpoint duplicated launches only on day
-two, which the first-day probe missed. Review corrections shortened repetition
-to the last intended daily launch, exercised a yesterday-anchored `PT12H`
-trigger alongside `PT9M`, gave registration a full minute of lead time,
-and reported observed timestamps while rejecting wrong-minute launches.
-
-#### Previous Knowledge
-What deserves a test requires causal fixtures and real side effects.
-Validate the current checkout already describes yesterday anchoring, duplicate
-observation and a 30-second launch window. This records why those properties
-matter and how future probe changes must preserve them under slow CI setup.
-
-#### Verification and Limits
-PR #631 review commits and the current native-check description support this
-method lesson. No timing probe was rerun in this documentation-only pass;
-short isolated observations do not establish long-term reliability.
-
-#### Follow-up
-Consolidate into native timing guidance without weakening expected-minute checks.
-<!-- /glp-update:v1 id=8875d9d8-1e2e-4ef4-a5e7-3be07111b28e -->
+<!-- GLP consolidation: 2026-11-26T16:22:52Z; base=601eb3d6e5a204f7f92d886d3d20a5ced9110b3c -->
