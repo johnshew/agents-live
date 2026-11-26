@@ -31,76 +31,39 @@ still requires the issue dispositions, retained RC evidence, and developer
 approval of that exact RC. No functional verification is required from RC
 promotion through publication.
 
-<!-- glp-update:v1 id=18a71247-6a91-49f6-87cd-8ca4f6ad4c0d -->
 <a id="glp-18a71247-6a91-49f6-87cd-8ca4f6ad4c0d"></a>
-### GLP Update: Activation runs under the previously installed runtime's rules
-
-- Update-ID: 18a71247-6a91-49f6-87cd-8ca4f6ad4c0d
-- Recorded-UTC: 2026-10-08T23:35:44Z
-- Kind: lesson
-- Topics: local deployment, activation, installed runtime, in-flight runs
-- Workstream: 6.9.4rc5/rc6 release operations
-- Target: .agents/release.md, Numbered RC lifecycle; compared origin/main 3733230
-- Source-Session: CDL session 2026-10-08 (local log only)
-- Evidence-Basis: mixed
-- Application: applied
-- Consolidation: pending
-
-#### Change
-`tools/local-deploy.py` performs `upgrade --from <wheel>` through the currently
-installed CLI. Activation-time behavior changes, such as #574 stopping
-activation from waiting on in-flight agent runs, therefore take effect only
-for the activation after the fixed RC is installed. The first activation out
-of an older RC remains gated by the older code: on 2026-10-08, 6.9.4rc4
-refused 6.9.4rc6 activation with "agent work is running (process N)". Plan
-bootstrap activation for a moment without in-flight runs; a background retry
-when no `run` or `internal maintain` process exists is acceptable. Do not
-block the session waiting for work to drain or bypass `local-deploy`.
-
-RC5 was consumed and accepted in isolation but never activated: `doctor
---all-repos` failed on a stale registry entry, then the older activation code
-refused while runs were in flight. The stale entry was removed with
-`agents-live repos remove`. See #572, #574 and the [release-cycle
-history](../.github/release-cycles.toml).
-
-#### Evidence
-- Observed 2026-10-08: RC4 refused RC6 activation while an agent run was
-  active; RC5 acceptance and activation history is recorded in the
-  [release-cycle manifest](../.github/release-cycles.toml).
-- Developer-provided verified outcome, 2026-10-09: after #578 merged in PR #579,
-  local-deploy reused the retained RC6 bytes and activated them at the first
-  idle moment via a background retry. `agents-live --version` reported 6.9.4rc6
-  on the candidate channel, `doctor --all-repos` exited 0, and watchers ran
-  from the 6.9.4rc6 generation.
-- Issues #572 and #574 track the deployment-input and in-flight activation
-  behavior, respectively; #578 and PR #579 record the local-deploy tooling fix.
-
-#### Previous Knowledge
-The local numbered RC workflow above describes activation through the installed
-upgrade command but does not distinguish which installed runtime governs the
-bootstrap activation.
-
-#### Verification and Limits
-The installed 6.9.4rc4 runtime refused RC6 bootstrap activation while an agent
-run was in flight. After #578 fixed the local-deploy source check in PR #579,
-the retained RC6 bytes were activated at the first idle moment via a background
-retry. Verified results: `agents-live --version` reported 6.9.4rc6 on the
-candidate channel, `doctor --all-repos` exited 0, and watchers ran from the
-6.9.4rc6 generation. The source-check gap was tooling-only; its changelog entry
-is deferred to the next package change. These observations establish local
-activation and checks only, not publication approval or later operational
-acceptance.
-
-#### Follow-up
-Consolidate into the local numbered RC guidance in a separately scoped
-per-document phase; consolidation remains pending.
-<!-- /glp-update:v1 id=18a71247-6a91-49f6-87cd-8ca4f6ad4c0d -->
+`local-deploy.py --rc` bootstraps activation through `upgrade --from <wheel>`
+using the currently installed CLI. Therefore, the installed runtime governs
+the first activation; behavior introduced by the incoming RC applies only
+after it is installed. If an older runtime refuses while work is in progress,
+do not block the session waiting for runs to drain or bypass `local-deploy`.
+Retry through the supported deployment command at the next idle opportunity.
+This distinction was observed when the 6.9.4rc4 runtime initially refused RC6
+activation, then the retained RC6 bytes were activated through a background
+retry after #578 fixed a separate local-deploy source check (#574, #578, #579;
+see the [release-cycle history](../.github/release-cycles.toml)). This local
+activation evidence is not publication approval or operational acceptance.
 
 ### Numbered attempt commands
 
 Numbered acceptance uses an isolated temporary repository and the exact wheel.
 It does not require a consumer repository or a local version switch. From clean,
 synchronized configured source, prepare the configured next RC:
+
+<a id="glp-06a12ac9-b6e1-4f38-aa04-68de6d8a863b"></a>
+Before preparation, confirm that the selected cycle's `next_rc` in
+[release-cycles.toml](../.github/release-cycles.toml) names the intended
+attempt. `release.py --prepare-rc` enforces this selection; do not bypass the
+guard or reuse a consumed identity.
+
+<a id="glp-44e97798-a467-4dd5-a714-5195a7aedd5c"></a>
+After an attempt is consumed, including a locally activated RC or a rolled-back
+attempt, record its history and advance `next_rc` on `main` promptly and before
+preparing the next attempt. This keeps the release report aligned with retained
+attempts and makes the next allocation explicit. The rule was prompted by an
+RC4 report that still named the consumed attempt as next, and a later
+preparation refusal resolved by recording RC4 and advancing the manifest
+through PR #632 (#565; [cycle history](../.github/release-cycles.toml)).
 
 ```bash
 uv run --script tools/release.py --prepare-rc <configured-next-rc> --yes
@@ -171,6 +134,23 @@ later in this document do not override this numbered workflow.
 
 Deploy the prepared RC for in-situ evaluation. All source, platform, packaged,
 bootstrap, dashboard, provider, and operational checks belong to the RC process.
+During operational evaluation, observe maintenance launch-gate hold time under
+representative agent load as well. Issue #565 followed an observed hold of about
+19 minutes and missed scheduled launches; this is a risk signal, not a universal
+threshold.
+
+<a id="glp-bddde36b-b5e5-4222-b510-c390a4564685"></a>
+After activating an RC that changes schedule registration, observe the next two
+5-minute maintenance launches and at least one clock agent at its due minute.
+For Windows, correlate due and observed launch times with Task Scheduler
+`LastRunTime` and `LastTaskResult` and `agents-live logs timeline`, and record
+the evidence. Roll back to the previous RC if any required launch is more than
+2 minutes late, following the dashboard and watcher restoration procedure in
+[testing.md](testing.md#deploy-a-numbered-rc-locally). RC4 passed isolated
+checks but produced no scheduled launches; three observed RC5 launches were
+within two seconds of their due minute (#630, #631). These observations support
+the live check, not long-term reliability or publication approval.
+
 Once the developer accepts the deployed RC, record approval in the cycle
 manifest with its `attempt`, original source `commit`, `wheel_sha256`, and
 `decided_on`. Approval attests completion of the RC evaluation; publication
@@ -209,6 +189,18 @@ assets. Verify GitHub and PyPI availability and hashes independently; do not run
 the installed tool as an additional release acceptance check.
 
 ### Retry and rejection
+
+<a id="glp-ec8c594d-1999-4213-8ca2-cde4ade4643a"></a>
+If local deployment reports failure or that rollback needs operator attention,
+verify the actual runtime before retrying or claiming rollback: inspect the
+selected version, `agents-live --version`, `doctor --all-repos`, activation
+admin events, and the generation used by started watchers. Activation may
+succeed before watcher handoff fails, and maintenance may prevent rollback.
+Record the verified state and any missing receipt in the cycle history. Do not
+retry activation while its cause remains. The 2026-10-29 RC2 observer
+start-up timeout followed a successful activation; plugin-import timing was a
+suspected cause from one observation, not a reproduced diagnosis (#604; see
+[cycle history](../.github/release-cycles.toml)).
 
 Use `--prepare-attempt <attempt> --yes` in its retained worktree to retry unchanged
 preparation. Completed builds are reused byte-for-byte; changed or unreceipted
@@ -596,196 +588,4 @@ conflict. Never relabel historical deployment observations as package acceptance
 or overwrite a published tag. Remote testing distribution requires separate
 authorization and does not confer stable-publication approval.
 
-<!-- glp-update:v1 id=44e97798-a467-4dd5-a714-5195a7aedd5c -->
-<a id="glp-44e97798-a467-4dd5-a714-5195a7aedd5c"></a>
-### GLP Update: Record a consumed RC on main before it runs for long
-
-- Update-ID: 44e97798-a467-4dd5-a714-5195a7aedd5c
-- Recorded-UTC: 2026-10-08T14:21:29Z
-- Kind: addition
-- Topics: numbered RC lifecycle, release-cycles.toml, next_rc, release report, operational load
-- Workstream: 6.9.4rc5 (#565) orchestration
-- Target: .agents/release.md, Numbered RC lifecycle; compared origin/main dccdc4b
-- Source-Session: CDL session 2026-10-08 (local log only)
-- Evidence-Basis: mixed
-- Application: applied
-- Consolidation: pending
-
-#### Change
-After an RC is prepared and locally activated, land a small release-metadata
-change on main promptly that records its history entry and advances `next_rc`.
-Do not wait until the next RC is planned. Otherwise the release report shows
-the active runtime's RC as the next RC with no selected RC, and routing agents
-must reconstruct state from tags, branches and retained receipts. During RC
-evaluation, also check scheduled maintenance and the hold time of the launch
-gate under realistic agent counts: #565 surfaced only after days of
-production use on RC4.
-
-#### Evidence
-- Observed 2026-10-08: tag `rc/6.9.4rc4` exists on origin and the local runtime
-  selection is 6.9.4rc4, but `.github/release-cycles.toml` on main (dccdc4b)
-  still had `next_rc = "6.9.4rc4"` and no RC4 history. The generated report
-  listed Selected RC "-" and Next RC 6.9.4rc4. The local
-  `release/v6.9.4rc4-candidate` branch had no remote counterpart.
-- #565 (filed 2026-10-08): a maintenance run on 6.9.4rc4 held the gate for
-  about 19 minutes, and scheduled launches were missed.
-- Precedent: 8b20e9f recorded RC3 only when RC4 was planned.
-
-#### Previous Knowledge
-Numbered attempt commands above describe preparation, acceptance and approval.
-They do not say when a consumed RC's history must reach main. This adds that
-timing; it does not change allocation or immutability rules.
-
-#### Verification and Limits
-Inference from one cycle. Allocation already refuses to reuse a consumed
-identity, so the gap is a routing and reporting risk, not a byte-safety risk.
-Whether `tools/release.py` should write the record automatically is not
-decided.
-
-#### Follow-up
-Consider having release tooling report an unrecorded consumed RC (related
-to #562). Fold into Numbered RC lifecycle at the next consolidation.
-<!-- /glp-update:v1 id=44e97798-a467-4dd5-a714-5195a7aedd5c -->
-
-<!-- glp-update:v1 id=ec8c594d-1999-4213-8ca2-cde4ade4643a -->
-<a id="glp-ec8c594d-1999-4213-8ca2-cde4ade4643a"></a>
-### GLP Update: Verify the runtime before acting on a failed activation
-
-- Update-ID: ec8c594d-1999-4213-8ca2-cde4ade4643a
-- Recorded-UTC: 2026-10-29T05:55:00Z
-- Kind: lesson
-- Topics: local deployment, activation, rollback, watchers, plugins
-- Workstream: 6.9.5rc2 preparation and activation
-- Target: .agents/release.md, Numbered RC lifecycle; compared origin/main 7743abd
-- Source-Session: CDL session 2026-10-29 (local log only)
-- Evidence-Basis: observation
-- Application: applied
-- Consolidation: pending
-
-#### Change
-When `local-deploy` reports a failed runtime upgrade followed by "rollback needs
-operator attention", read the actual runtime state before acting. Check which
-version `current` selects, `agents-live --version`, `doctor --all-repos`, the
-admin events around the activation, and which generation the started watchers
-run from. Activation can succeed while a watcher handoff fails afterwards. The
-rollback's `versions activate` is refused while scheduled maintenance holds the
-gate, and maintenance can then repair the watcher on the new generation.
-Record the verified state and the missing receipt in the cycle history. Do not
-retry activation while the cause, such as a slow declared-plugin import beyond
-the 5s watcher observer start-up deadline, is still present.
-
-#### Evidence
-- Observation 2026-10-29: the 6.9.5rc2 `generation.activate` event succeeded.
-  About 12s later the note-index watcher exited with `startup_timeout`, and the
-  upgrade logged "watcher observer startup timed out". `local-deploy` then
-  reported rollback failure while scheduled maintenance ran. Maintenance restarted
-  the watcher on the RC2 generation and completed healthy. `doctor --all-repos`
-  exited 0 on 6.9.5rc2.
-- On the same host, one declared plugin's import cost about 6.5s per process,
-  above `OBSERVER_STARTUP_SECONDS = 5.0` in `runtime/watcher.py`. The causal
-  link is inferred from that timing, not separately reproduced.
-
-#### Previous Knowledge
-The activation GLP update above covers refusal by the previously installed
-runtime. It does not cover a successful activation whose watcher handoff fails,
-or a rollback refused by maintenance.
-
-#### Verification and Limits
-One activation on one Windows host. #604 tracks plugin start-up cost.
-
-#### Follow-up
-Consider whether the watcher observer deadline should account for plugin
-loading, or whether watcher start-up should defer plugin import (#604). Fold
-into the numbered RC guidance at the next consolidation.
-<!-- /glp-update:v1 id=ec8c594d-1999-4213-8ca2-cde4ade4643a -->
-
-<!-- glp-update:v1 id=bddde36b-b5e5-4222-b510-c390a4564685 -->
-<a id="glp-bddde36b-b5e5-4222-b510-c390a4564685"></a>
-### GLP Update: Observe scheduled launches after schedule-changing RC activation
-
-- Update-ID: bddde36b-b5e5-4222-b510-c390a4564685
-- Recorded-UTC: 2026-11-24T12:46:11Z
-- Kind: addition
-- Topics: RC activation, native scheduling, operational acceptance, rollback
-- Workstream: 6.9.5rc4 incident and rc5 evaluation
-- Target: .agents/release.md, Numbered RC lifecycle; compared origin/main 8c90b97fd499398bcc708f0890eb304137927e1b
-- Source-Session: incident and RC5 worker evidence review, 2026-11-24
-- Evidence-Basis: observation
-- Application: applied
-- Consolidation: pending
-
-#### Change
-After activating any RC that changes schedule registration, observe runtime
-maintenance at the next two 5-minute marks and at least one clock agent at its
-due minute. Correlate Task Scheduler `LastRunTime` and `LastTaskResult` with
-`agents-live logs timeline`, recording each due and observed launch time.
-Roll back to the previous RC if any required launch is more than 2 minutes late,
-using the existing dashboard and watcher restoration procedure.
-
-#### Evidence
-- [#630](https://github.com/johnshew/agents-live/issues/630), observed
-  2026-11-24: doctor, trigger readback and isolated acceptance passed for
-  6.9.5rc4, yet no Windows scheduled task launched. Rollback restored maintenance.
-- RC5 worker report, 2026-11-24: maintenance at 16:30 and 16:35 and a clock
-  agent at 16:42 (local time, UTC+04:00) all started within 2 seconds of their
-  due minute; Task Scheduler results were 0 and correlated runs succeeded.
-- [#631](https://github.com/johnshew/agents-live/pull/631) added the native
-  clock check to packaged readiness; that isolated check is not live activation.
-
-#### Previous Knowledge
-Numbered RC lifecycle separates isolated acceptance from operational checks;
-[testing.md, Deploy a numbered RC locally](testing.md#deploy-a-numbered-rc-locally)
-requires identity, doctor and restoration checks. Neither specifies these
-post-activation launch observations or the 2-minute rollback threshold.
-
-#### Verification and Limits
-This pass records reported observations, not a new activation or runtime test.
-Three timely RC5 launches establish this local check, not publication approval
-or long-term scheduling reliability.
-
-#### Follow-up
-Fold into RC operational evaluation at a separately scoped consolidation.
-<!-- /glp-update:v1 id=bddde36b-b5e5-4222-b510-c390a4564685 -->
-
-<!-- glp-update:v1 id=06a12ac9-b6e1-4f38-aa04-68de6d8a863b -->
-<a id="glp-06a12ac9-b6e1-4f38-aa04-68de6d8a863b"></a>
-### GLP Update: Confirm the configured next RC before preparation
-
-- Update-ID: 06a12ac9-b6e1-4f38-aa04-68de6d8a863b
-- Recorded-UTC: 2026-11-24T12:46:11Z
-- Kind: addition
-- Topics: numbered attempts, next_rc, manifest history, preparation
-- Workstream: 6.9.5rc4 incident and rc5 evaluation
-- Target: .agents/release.md, Numbered attempt commands; compared origin/main 8c90b97fd499398bcc708f0890eb304137927e1b
-- Source-Session: RC5 preparation and PR #632 evidence review, 2026-11-24
-- Evidence-Basis: observation
-- Application: applied
-- Consolidation: pending
-
-#### Change
-Before preparing an RC, confirm that the selected cycle's `next_rc` in
-[.github/release-cycles.toml](../.github/release-cycles.toml) names the intended
-attempt. After a consumed or rolled-back attempt, record its history and
-advance `next_rc` on main before preparing the next attempt.
-`release.py --prepare-rc` refuses an identity other than the configured next RC;
-do not bypass the guard or reuse a consumed identity.
-
-#### Evidence
-[PR #632](https://github.com/johnshew/agents-live/pull/632), observed
-2026-11-24, recorded the consumed RC4 and rollback and advanced `next_rc` to
-6.9.5rc5. The RC5 worker's initial preparation was refused before allocation;
-preparation resumed after this metadata change reached main.
-
-#### Previous Knowledge
-[Update 44e97798](#glp-44e97798-a467-4dd5-a714-5195a7aedd5c) requires prompt
-history recording after preparation and activation. Numbered attempt commands
-already require the configured next RC. This adds an explicit preflight and
-ordering after consumption or rollback, including attempts no longer active.
-
-#### Verification and Limits
-One preparation refusal and recovery, reconciled with PR #632. This append
-does not change routing values, allocation rules or retained evidence.
-
-#### Follow-up
-Consolidate with update 44e97798 in a separately scoped release-guide pass.
-<!-- /glp-update:v1 id=06a12ac9-b6e1-4f38-aa04-68de6d8a863b -->
+<!-- GLP consolidation: 2026-11-26T16:18:24Z; base=bf448a385a11c723af7188a763d1bdb6c22eb2f3 -->
