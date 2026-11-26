@@ -2714,6 +2714,47 @@ class TestWatcherExitEvidence(TempRepository):
         return ProcessRef(child["pid"], child["created_at"], "python", "watcher",
                           key=child["key"], fingerprint="synthetic")
 
+    def test_observer_startup_waits_for_slow_child_identity(self):
+        from agents_live.runtime import watcher
+        clock = {"now": 0.0}
+        observer = mock.Mock()
+        observer.poll.return_value = None
+
+        def read(path):
+            if Path(path).name == "child.json" and clock["now"] >= 6:
+                return {"pid": 42, "created_at": 1.0}
+            return {}
+
+        def sleep(_seconds):
+            clock["now"] += 1
+
+        with (
+            mock.patch.object(watcher.system, "spawn_detached", return_value=observer),
+            mock.patch.object(watcher, "_read", side_effect=read),
+            mock.patch.object(watcher.time, "monotonic", side_effect=lambda: clock["now"]),
+            mock.patch.object(watcher.time, "sleep", side_effect=sleep),
+        ):
+            started = watcher.spawn([sys.executable, "-m", "agents_live.runtime.watcher"],
+                                    cwd=self.root)
+
+        self.assertEqual(42, started.pid)
+
+    def test_stop_without_matching_session_records_a_valid_agent(self):
+        from agents_live.runtime import watcher
+        reference = ProcessRef(987654, 1.0, "missing-watcher", "watcher", key="missing")
+
+        watcher.stop(
+            reference, reason="activation", operation="activation",
+            repository=str(self.root), agent="")
+
+        directory = paths.repo_state_dir(self.root) / "logs"
+        patterns = [str(directory / "*.jsonl")]
+        with qlog.duckdb.connect(":memory:") as connection:
+            qlog.build_view(connection, patterns)
+            self.assertEqual([], qlog.check_schema(connection, patterns))
+        records = self._records()
+        self.assertEqual(["watcher"], [row["agent_name"] for row in records])
+
     @unittest.skipUnless(os.name == "nt", "native Windows file sharing")
     def test_snapshot_poll_waits_for_an_open_file_to_allow_reads(self):
         import ctypes

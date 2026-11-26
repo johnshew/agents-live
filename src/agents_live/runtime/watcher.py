@@ -21,7 +21,7 @@ STDERR_LIMIT = 8192
 POLL_SECONDS = 15.0
 PROGRESS_SECONDS = 45.0
 STARTUP_SECONDS = 30.0
-OBSERVER_STARTUP_SECONDS = 5.0
+OBSERVER_STARTUP_SECONDS = STARTUP_SECONDS
 SESSION_ENV = "AGENTS_LIVE_WATCH_SESSION"
 
 
@@ -99,7 +99,7 @@ def _event(request: dict, status: str, **fields) -> None:
     unexpected = status == "exited" and fields.get("stop_reason") in {
         "unexpected_exit", "observer_error", "error", "watch_failed", "startup_timeout"}
     fields["level"] = "error" if unexpected else "info"
-    agent = request.get("agent", "watcher")
+    agent = request.get("agent") or "watcher"
     filename = agent if agent and not any(char in agent for char in "/\\") else "watchers"
     events.record(directory / f"{filename}.jsonl", events.create(
         "watcher", status, repository=repository, agent=agent,
