@@ -1,7 +1,7 @@
 ---
 title: Changelog
 description: Reverse-chronological log of significant Agents Live changes
-ms.date: 2026-11-24
+ms.date: 2026-11-26
 ms.topic: reference
 ---
 
@@ -13,6 +13,13 @@ history is retained in the source repository.
 
 ### 6.9.5 (Unreleased)
 
+- fix: prevent false Windows watcher startup timeouts and keep watcher stop events valid for schema checks.
+  The observer now waits up to 30 seconds for startup, matching the health
+  `starting` grace period, instead of 5 seconds; this avoids false timeouts on
+  cold starts after reboot or version activation. When a watcher stops without a
+  matching session, including during version switches or rollbacks, its
+  `watcher.jsonl` event now records `"agent": "watcher"` rather than an empty
+  agent name, so it passes `agents-live logs --check-schema`.
 - fix: restore Windows clock tasks that registered successfully but never launched. ([#630](https://github.com/johnshew/agents-live/issues/630))
   Convert today's first local scheduled minute to an explicit UTC `Z` boundary
   and repeat at the schedule's natural interval. Regular schedules use one daily

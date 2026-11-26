@@ -265,7 +265,10 @@ or app child sessions. They add no commit, merge, release or runtime authority.
   ongoing work or automation. Before teardown, preserve any ignored scratch a
   successor still needs in an approved durable home. Archive through the
   harness lifecycle (in the GitHub Copilot app, only the creating session can
-  archive its child); never remove an app-managed worktree by hand.
+  archive its child); never remove an app-managed worktree by hand. Remove
+  app-created worktrees that share `main` as soon as the release step that
+  created them finishes; advancing `main` otherwise leaves their working tree
+  stale with phantom reverse-staged changes.
 
 ## Commit hygiene
 
