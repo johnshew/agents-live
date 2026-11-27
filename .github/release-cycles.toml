@@ -204,10 +204,14 @@ evidence = "Prepared and consumed from main on 2026-10-08; packaged readiness an
 branch = "main"
 next_rc = "6.9.5rc7"
 selected_rc = "6.9.5rc6"
-recommendation = "6.9.5rc6 is selected locally with PR #635's watcher startup timeout and exit-log schema fixes. Isolated hello-world acceptance passed; local activation reused the prepared bytes, doctor --all-repos exited 0 with 6 schedule triggers registered for the current local UTC offset, and started agents including the watcher are running on RC6. #636's aggregate watcher startup gate-hold budget follow-up is deferred to the next cycle. This RC is not publication-approved; the developer must decide whether to approve this exact RC. Changed package source must use RC7."
+recommendation = "The developer approved the exact deployed 6.9.5rc6 source and retained wheel for 6.9.5 publication on 2026-11-27 after overnight live observation (0 runtime/watcher errors; maintenance and overnight daily schedules fired on time). Next: run --prepare-final --from-rc 6.9.5rc6, then --finalize and --publish, without rebuilding RC bytes, functional retesting, or changing the local runtime. #636 and other deferred items (#588, #566, #567, #604, #613) remain deferred."
 
 [cycles."6.9.5".approval]
-decision = "testing"
+decision = "approved"
+attempt = "6.9.5rc6"
+commit = "4cdf0fbad92c9ae9d3ddc1952ba8d9d435c79c1a"
+wheel_sha256 = "b4c3bced25a33d27fc8f7d823c2c126b35a10e37fd3f414704d447a482142191"
+decided_on = "2026-11-27"
 
 [cycles."6.9.5".issues]
 planned = [582, 591, 590, 601, 602, 603, 539, 609, 616]
@@ -285,4 +289,4 @@ commit = "33d74a0de46cef95629bd7b077fa94a1a5bd7b74"
 source_commit = "4cdf0fbad92c9ae9d3ddc1952ba8d9d435c79c1a"
 wheel_sha256 = "b4c3bced25a33d27fc8f7d823c2c126b35a10e37fd3f414704d447a482142191"
 sdist_sha256 = "f7b944d3b57cd3a53068985f8be26365f7ad0621e4596047dc8eec0c0611dcdf"
-evidence = "Prepared and consumed from main on 2026-11-26 with PR #635's watcher startup timeout and exit-log schema fixes, plus PR #637's changelog and docs update. Source and packaged readiness passed all gates. Isolated hello-world acceptance passed through copilot. local-deploy activated it from 6.9.5rc5 at about 16:09 UTC, reusing the prepared bytes. agents-live --version reports 6.9.5rc6 on the candidate channel; doctor --all-repos exited 0 with 6 schedule triggers registered for the current local UTC offset, and started agents including the watcher are running on RC6. This history is not publication approval; changed source must use RC7."
+evidence = "Prepared and consumed from main on 2026-11-26 with PR #635's watcher startup timeout and exit-log schema fixes, plus PR #637's changelog and docs update. Source and packaged readiness passed all gates. Isolated hello-world acceptance passed through copilot. local-deploy activated it from 6.9.5rc5 at about 16:09 UTC, reusing the prepared bytes. agents-live --version reports 6.9.5rc6 on the candidate channel; doctor --all-repos exited 0 with 6 schedule triggers registered for the current local UTC offset, and started agents including the watcher are running on RC6. After overnight live observation (>20h, 0 runtime/watcher errors, maintenance and daily schedules fired on time), the developer approved this exact source and retained wheel for 6.9.5 publication on 2026-11-27. Changed package source must use RC7."

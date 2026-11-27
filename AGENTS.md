@@ -319,8 +319,10 @@ agent were then observed launching within seconds of their due minutes. It is
 not publication-approved. Do not reuse consumed RC5. The next numbered RC is
 `6.9.5rc6`. 6.9.5rc6 was prepared from `4cdf0fb` with the watcher startup
 timeout and exit-log schema fixes from PR #635, passed isolated acceptance, and
-was locally activated on 2026-11-26. It is not publication-approved. Do not
-reuse consumed RC6. The next numbered RC is `6.9.5rc7`.
+was locally activated on 2026-11-26. On 2026-11-27 the developer approved the
+exact deployed 6.9.5rc6 source and retained wheel for 6.9.5 publication without
+rebuilding RC bytes, retesting functionality, or changing the local runtime.
+Do not reuse consumed RC6. Changed package source must use RC7.
 Retained 6.9.2 RC6 does not supersede the approved 6.9.2 RC5 selection. Preserve
 all historical packages,
 receipts and tags, including the rejected unpublished stable-tag conflict.
