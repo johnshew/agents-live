@@ -1205,6 +1205,41 @@ class TestDoctor(unittest.TestCase):
 
 
 class TestReleaseTool(unittest.TestCase):
+    def test_changelog_entries_parse_markdown_and_mixed_issue_refs(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        release = runpy.run_path(str(root / "tools" / "release.py"))
+        entries = release["_changelog_entries"](
+            "\n".join((
+                "- fix: restore clock tasks. "
+                "([#630](https://github.com/johnshew/agents-live/issues/630))",
+                "- fix: improve schedule handling. "
+                "([#631](https://github.com/johnshew/agents-live/issues/631), "
+                "#632, [#633](https://github.com/johnshew/agents-live/issues/633))",
+            )),
+            "6.9.5",
+        )
+
+        self.assertEqual(
+            ["fix: restore clock tasks", "fix: improve schedule handling"],
+            [entry.summary for entry in entries],
+        )
+        self.assertEqual([(630,), (631, 632, 633)], [
+            entry.issues for entry in entries
+        ])
+
+    def test_changelog_entry_requires_punctuation_before_markdown_issue_ref(
+            self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        release = runpy.run_path(str(root / "tools" / "release.py"))
+
+        with self.assertRaisesRegex(
+                release["ReleaseError"], "incomplete first-line summary"):
+            release["_changelog_entries"](
+                "- fix: restore clock tasks "
+                "([#630](https://github.com/johnshew/agents-live/issues/630))",
+                "6.9.5",
+            )
+
     def test_numbered_rc_cycle_blocks_legacy_candidate_commands(self) -> None:
         source = Path(__file__).resolve().parents[1] / "tools" / "release.py"
         with tempfile.TemporaryDirectory() as temporary:
