@@ -322,7 +322,16 @@ timeout and exit-log schema fixes from PR #635, passed isolated acceptance, and
 was locally activated on 2026-11-26. On 2026-11-27 the developer approved the
 exact deployed 6.9.5rc6 source and retained wheel for 6.9.5 publication without
 rebuilding RC bytes, retesting functionality, or changing the local runtime.
-Do not reuse consumed RC6. Changed package source must use RC7.
+Do not reuse consumed RC6. Stable 6.9.5 was published from approved RC6 through
+retained final attempt `6.9.5-final-1` on 2026-11-27. Final commit
+`99574617825640aebd6adc512dfd172fcd331bb8` is tagged `v6.9.5`
+(`94dcc8c54f1af03fce0c14611d6b597b223ee85e`). GitHub Release and PyPI
+publication and retained wheel/sdist hashes were independently verified; the
+package proxy returned HTTP 200 but did not yet list `6.9.5`. Do not prepare or
+publish this version again. Publication did not rebuild RC bytes, retest
+functionality, or change the local runtime, which remains `6.9.5rc6`. Issues
+#582, #591, #590, #601, #602, #603, #539, #609, #616, #627, #630 and #631 are
+delivered; #588, #566, #567, #604, #613 and #636 remain deferred.
 Retained 6.9.2 RC6 does not supersede the approved 6.9.2 RC5 selection. Preserve
 all historical packages,
 receipts and tags, including the rejected unpublished stable-tag conflict.
