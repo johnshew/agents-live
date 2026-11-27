@@ -54,8 +54,13 @@ BOOTSTRAP_VERSION_MARKERS = {
 VERSION_RE = re.compile(r'^version = "(\d+\.\d+\.\d+(?:rc[1-9]\d*)?)"$', re.MULTILINE)
 BUMP_ORDER = {"patch": 0, "minor": 1, "major": 2}
 COMPARE_URL = "https://github.com/johnshew/agents-live/compare/{base}...{tag}"
-SUMMARY_END_RE = re.compile(r"[.!?](?: \(#\d+(?:, #\d+)*\))?$")
-ISSUE_REFS_RE = re.compile(r"\s*\((#\d+(?:,\s*#\d+)*)\)\s*$")
+ISSUE_REF_PATTERN = r"(?:#\d+|\[#\d+\]\([^)\s]+\))"
+SUMMARY_END_RE = re.compile(
+    rf"[.!?](?: \({ISSUE_REF_PATTERN}(?:,\s*{ISSUE_REF_PATTERN})*\))?$"
+)
+ISSUE_REFS_RE = re.compile(
+    rf"\s+\(({ISSUE_REF_PATTERN}(?:,\s*{ISSUE_REF_PATTERN})*)\)\s*$"
+)
 COMMIT_TYPE_RE = re.compile(r"^(?P<type>[a-z]+)(?:\([^)]*\))?(?P<bang>!)?: ")
 MERGE_PR_RE = re.compile(r"^Merge pull request #(\d+) ")
 BREAKING_RE = re.compile(r"(?m)^\s*BREAKING CHANGE:\s*")
@@ -249,7 +254,12 @@ def _issue_refs(line: str) -> tuple[int, ...]:
     match = ISSUE_REFS_RE.search(line)
     if match is None:
         return ()
-    return tuple(int(ref.lstrip("#")) for ref in match.group(1).split(", "))
+    return tuple(
+        int(linked or bare)
+        for linked, bare in re.findall(
+            r"\[#(\d+)\]\([^)\s]+\)|#(\d+)", match.group(1)
+        )
+    )
 
 
 def _summary_text(line: str) -> str:
