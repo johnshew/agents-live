@@ -11,6 +11,8 @@ history is retained in the source repository.
 
 ## Unreleased
 
+## 6.9.5 - 2026-11-27
+
 ### 6.9.5 (Unreleased)
 
 - fix: prevent false Windows watcher startup timeouts and keep watcher stop events valid for schema checks.
